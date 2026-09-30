@@ -1,0 +1,23 @@
+__include: double_pinyin.schema:/
+schema:
+  schema_id: rime_ime_ziranma
+  name: R-IME 自然码双拼
+  version: "1.0"
+__patch:
+  schema/schema_id: rime_ime_ziranma
+  schema/name: R-IME 自然码双拼
+  schema/version: "1.0"
+  translator/prism: rime_ime_ziranma
+  translator/user_dict: rime_ime_ziranma
+  engine/translators:
+    - punct_translator
+    - table_translator@custom_phrase
+    - reverse_lookup_translator
+    - script_translator
+  custom_phrase:
+    dictionary: ""
+    user_dict: rime_ime_phrases
+    db_class: stabledb
+    enable_completion: false
+    enable_sentence: false
+    initial_quality: 100

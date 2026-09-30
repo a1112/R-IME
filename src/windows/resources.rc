@@ -1,0 +1,5 @@
+#include <windows.h>
+
+// Keep the brand icon first: TSF RegisterProfile uses icon index zero.
+101 ICON "r-ime.ico"
+102 ICON "r-ime-ascii.ico"

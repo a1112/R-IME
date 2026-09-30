@@ -1,0 +1,6 @@
+/build*/
+/.cache/
+/third_party/
+*.user
+__pycache__/
+.DS_Store

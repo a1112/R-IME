@@ -1,0 +1,25 @@
+# The distribution's maintained Luna Pinyin dictionary is reused without
+# modifying it. All generated tables and learning stay in R-IME's user data.
+__include: luna_pinyin.schema:/
+schema:
+  schema_id: rime_ime_pinyin
+  name: R-IME 全拼
+  version: "1.0"
+__patch:
+  schema/schema_id: rime_ime_pinyin
+  schema/name: R-IME 全拼
+  schema/version: "1.0"
+  translator/prism: rime_ime_pinyin
+  translator/user_dict: rime_ime_pinyin
+  engine/translators:
+    - punct_translator
+    - table_translator@custom_phrase
+    - reverse_lookup_translator
+    - script_translator
+  custom_phrase:
+    dictionary: ""
+    user_dict: rime_ime_phrases
+    db_class: stabledb
+    enable_completion: false
+    enable_sentence: false
+    initial_quality: 100

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=R-IME Settings
+Name[zh_CN]=R-IME 设置
+Comment=Personal Chinese input, quietly yours
+Comment[zh_CN]=让中文输入，更合你的习惯
+Exec=r-ime-settings
+Icon=r-ime
+Terminal=false
+Categories=Settings;Utility;
+Keywords=Input;Chinese;Pinyin;Rime;

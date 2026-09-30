@@ -1,0 +1,33 @@
+name: Linux build and integration
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  debian:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sh packaging/install-build-deps.sh
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr
+      - name: Build
+        run: cmake --build build -j2
+      - name: Test real librime and application
+        run: ctest --test-dir build --output-on-failure
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+      - name: Stage installation
+        run: DESTDIR=/tmp/r-ime-package cmake --install build
+      - name: Verify staged uninstall keeps user data
+        run: |
+          mkdir -p /tmp/r-ime-package/home/test/.local/share/r-ime
+          printf '%s\n' 'keep-user-data' > /tmp/r-ime-package/home/test/.local/share/r-ime/sentinel
+          DESTDIR=/tmp/r-ime-package cmake --build build --target uninstall
+          test "$(cat /tmp/r-ime-package/home/test/.local/share/r-ime/sentinel)" = keep-user-data
+          while IFS= read -r path; do
+            test ! -e "/tmp/r-ime-package$path"
+          done < build/install_manifest.txt
