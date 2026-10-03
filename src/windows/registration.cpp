@@ -96,7 +96,7 @@ struct Registration {
                                              TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE),
                 "Enable current-user modern TSF profile");
     }
-    void install(const std::filesystem::path &dll) {
+    void install(const std::filesystem::path &dll, bool user_phase = true) {
         if (!std::filesystem::is_regular_file(dll))
             throw std::runtime_error("The TSF DLL does not exist");
         auto previous = registered_dll();
@@ -117,16 +117,19 @@ struct Registration {
                         "Register TSF category");
             // Enable only this user's profile. Never set the default or activate
             // it globally: existing input-method preferences remain intact.
-            require(profiles->EnableLanguageProfile(service_id, language_id, profile_id, TRUE),
-                    "Enable current-user R-IME profile");
+            if (user_phase)
+                require(profiles->EnableLanguageProfile(service_id, language_id, profile_id, TRUE),
+                        "Enable current-user R-IME profile");
             if (!exists())
                 throw std::runtime_error("Windows did not enumerate the new R-IME profile");
             // TSF loads the text service through the machine COM registration.
             // Remove only our own obsolete per-user class shadow, in this
             // helper's architecture view, after the machine install succeeds.
-            auto shadow = RegDeleteTreeW(HKEY_CURRENT_USER, com_key().c_str());
-            if (shadow != ERROR_FILE_NOT_FOUND)
-                require(HRESULT_FROM_WIN32(shadow), "Remove obsolete R-IME per-user COM shadow");
+            if (user_phase) {
+                auto shadow = RegDeleteTreeW(HKEY_CURRENT_USER, com_key().c_str());
+                if (shadow != ERROR_FILE_NOT_FOUND)
+                    require(HRESULT_FROM_WIN32(shadow), "Remove obsolete R-IME per-user COM shadow");
+            }
         } catch (...) {
             if (createdProfile) {
                 for (auto id : categories)
@@ -140,8 +143,9 @@ struct Registration {
             throw;
         }
     }
-    void uninstall() {
-        profiles->EnableLanguageProfile(service_id, language_id, profile_id, FALSE);
+    void uninstall(bool user_phase = true) {
+        if (user_phase)
+            profiles->EnableLanguageProfile(service_id, language_id, profile_id, FALSE);
         // An absent profile is an idempotent success; errors removing an existing
         // registration are reported so uninstall cannot claim a false success.
         if (exists()) {
@@ -154,9 +158,43 @@ struct Registration {
         auto status = RegDeleteTreeW(HKEY_LOCAL_MACHINE, com_key().c_str());
         if (status != ERROR_FILE_NOT_FOUND)
             require(HRESULT_FROM_WIN32(status), "Remove machine COM registration");
-        status = RegDeleteTreeW(HKEY_CURRENT_USER, com_key().c_str());
-        if (status != ERROR_FILE_NOT_FOUND)
-            require(HRESULT_FROM_WIN32(status), "Remove obsolete R-IME per-user COM shadow");
+        if (user_phase) {
+            status = RegDeleteTreeW(HKEY_CURRENT_USER, com_key().c_str());
+            if (status != ERROR_FILE_NOT_FOUND)
+                require(HRESULT_FROM_WIN32(status), "Remove obsolete R-IME per-user COM shadow");
+        }
+    }
+    void query_profile() {
+        // Enumerate only Microsoft's TSF profile manager. Do not instantiate
+        // service_id: a foreign registered COM server must not be loaded merely
+        // to decide whether this installer owns the system registration.
+        ComPtr<IEnumTfInputProcessorProfiles> enumeration;
+        require(manager->EnumProfiles(language_id, &enumeration), "Enumerate TSF profiles");
+        bool found = false, keyboard = false, enabled = false;
+        for (;;) {
+            TF_INPUTPROCESSORPROFILE profile{};
+            ULONG fetched = 0;
+            HRESULT result = enumeration->Next(1, &profile, &fetched);
+            require(result, "Read TSF profile");
+            if (fetched == 0)
+                break;
+            if (profile.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR &&
+                profile.clsid == service_id && profile.guidProfile == profile_id) {
+                found = true;
+                keyboard = profile.catid == GUID_TFCAT_TIP_KEYBOARD;
+                // Enumeration flags can miss a current-user Enable override.
+                // Ask Microsoft's profile manager directly without loading our DLL.
+                BOOL user_enabled = FALSE;
+                require(profiles->IsEnabledLanguageProfile(service_id, language_id, profile_id,
+                                                           &user_enabled),
+                        "Query current-user profile enabled state");
+                enabled = user_enabled != FALSE;
+                break;
+            }
+        }
+        std::cout << "{\"exists\":" << (found ? "true" : "false")
+                  << ",\"keyboardCategory\":" << (keyboard ? "true" : "false")
+                  << ",\"enabled\":" << (enabled ? "true" : "false") << "}\n";
     }
     void check() {
         if (!exists())
@@ -192,7 +230,8 @@ int wmain(int argc, wchar_t **argv) {
         Registration registration;
         if (argc < 2)
             throw std::runtime_error("Usage: r-ime-register --register [r-ime-tsf.dll] | "
-                                     "--unregister | --enable-user | --disable-user | --check");
+                                     "--register-system [dll] | --unregister-system | "
+                                     "--unregister | --enable-user | --disable-user | --check | --query-profile");
         std::wstring action = argv[1];
         if (action == L"--register") {
             registration.install(argc >= 3 ? std::filesystem::path(argv[2])
@@ -202,6 +241,13 @@ int wmain(int argc, wchar_t **argv) {
             registration.uninstall();
             std::cout
                 << "R-IME registration removed. User dictionaries and settings were preserved.\n";
+        } else if (action == L"--register-system") {
+            registration.install(argc >= 3 ? std::filesystem::path(argv[2])
+                                           : rime_ime::win::module_directory() / L"r-ime-tsf.dll", false);
+            std::cout << "R-IME machine registration completed; user phase was not requested.\n";
+        } else if (action == L"--unregister-system") {
+            registration.uninstall(false);
+            std::cout << "R-IME machine registration removed; user phase was not requested.\n";
         } else if (action == L"--enable-user") {
             registration.enable_user();
             std::cout
@@ -211,6 +257,8 @@ int wmain(int argc, wchar_t **argv) {
             std::cout << "R-IME removed from the current user's Windows input list.\n";
         } else if (action == L"--check")
             registration.check();
+        else if (action == L"--query-profile")
+            registration.query_profile();
         else
             throw std::runtime_error("Unknown registration command");
         registration.category.Reset();
