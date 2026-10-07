@@ -54,7 +54,7 @@ nlohmann::json Client::call(nlohmann::json request, int timeout_ms) {
             (request["op"] != "create" && reply.at("session") != request["session"]))
             throw std::runtime_error("stale R-IME reply");
         if (!reply.value("ok", false))
-            throw RpcError(reply.value("error", std::string("R-IME request failed")));
+            throw RpcError(reply.value("error", std::string("R-IME request failed")), reply);
         return reply;
     } catch (const RpcError &) {
         throw;

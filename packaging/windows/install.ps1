@@ -13,7 +13,7 @@ $tip='0804:{1A5D0370-40A3-4865-90A6-324E1BB1855B}{80B722F7-FA50-4D8E-A084-E12A5B
 $state=Join-Path $env:LOCALAPPDATA 'R-IME'
 $manifest=Join-Path $state 'installation.json'
 $attempt=Join-Path $state 'installation-attempt.json'
-foreach($file in @('r-ime-engine.exe','r-ime-settings.exe','r-ime-tsf.dll','r-ime-register.exe','x86/r-ime-tsf.dll','x86/r-ime-register.exe')){if(!(Test-Path -LiteralPath (Join-Path $source $file))){throw "Incomplete package: $file"}}
+foreach($file in @('r-ime-engine.exe','r-ime-settings.exe','r-ime-tsf.dll','r-ime-register.exe','r-ime-ctl.exe','x86/r-ime-tsf.dll','x86/r-ime-register.exe')){if(!(Test-Path -LiteralPath (Join-Path $source $file))){throw "Incomplete package: $file"}}
 if($SystemPhase){
     # Elevation is limited to protected binaries and machine TSF/COM registration.
     # Never launch the worker or settings from the elevated phase.

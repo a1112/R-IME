@@ -1,14 +1,18 @@
 # R-IME
 
 一个支持 Linux / Windows 的中文系统输入法：独立的 Fcitx 5 / Windows TSF 入口、Rime 输入核心，
-以及接近 macOS 风格的专属候选窗和偏好设置。
+Windows 版本采用接近 Windows 11 微软拼音的候选窗、系统“中 / A”状态和 Fluent 设置界面；
+Linux 版本保留简洁的专属候选窗和偏好设置。
 
 默认离线全拼、简体。支持小鹤与自然码双拼、简繁切换、用户词频学习、
 自定义短语、快捷键、独立外观和本地备份。
+Windows 支持 Shift 切换中英文、Shift + 空格切换全半角、Ctrl + 句号切换标点，
+上下键逐项选择候选。应用接管 TSF 候选界面时，R-IME 会按应用要求显示或隐藏自己的窗口。
 
 ## Windows 安装
 
 Windows 11 x64 提供 64 位引擎和设置程序，以及 64 / 32 位 TSF 组件。
+Windows 设置界面需要 Qt 6.11+，使用 FluentWinUI3 控件。
 在普通 PowerShell 窗口运行打包目录的 `install.ps1`；安装程序会请求提升权限，
 将系统组件放入 `Program Files\R-IME`，再为当前用户启用输入法和启动项。
 按 **Win + 空格** 选择 **R-IME**，从开始菜单打开 **R-IME 设置**。
@@ -35,6 +39,13 @@ R-IME 安装自己的三个覆盖方案，不读取现有 fcitx5-rime 的用户�
 
 只编译引擎及配置测试可添加 `-DRIME_BUILD_FCITX=OFF -DRIME_BUILD_SETTINGS=OFF`。
 设置程序与系统输入法是独立进程，关闭设置不会中断输入。
+
+## 本地控制接口
+
+`r-ime-ctl` 提供 JSON 命令行和常驻 JSON Lines API，可查询状态、切换默认方案/模式、
+修改配置、管理短语和备份恢复；C++ 应用可链接 `RIME::control`。
+每个连接的输入会话互相隔离，配置更新具有并发冲突检查。
+命令、Python 示例与 SDK 用法见 [控制接口指南](docs/control-api.md)。
 
 ## 在 KDE 启用
 
@@ -70,3 +81,5 @@ Windows 的构建、TSF 宿主和安装验证单独记录在 [Windows 指南](do
 `src/fcitx/vendor`，上游来源和 LGPL 许可证随源码及安装一起提供。
 
 ![R-IME 设置](docs/images/settings-light.png)
+
+![Windows 11 风格设置](docs/images/settings-windows-native.png)

@@ -62,11 +62,13 @@ struct Worker {
     std::string startup_error;
     std::mutex mutex;
     bool deploying = false;
+    uint64_t session_generation = 0;
     fs::path user() const {
         return paths.data / L"rime";
     }
     void start() {
         engine = std::make_unique<Engine>(shared, user(), config);
+        ++session_generation;
     }
     Worker() {
         fs::create_directories(paths.runtime);
@@ -133,6 +135,38 @@ struct Worker {
         };
         return {{"version", 1}, {"id", number("id")}, {"session", number("session")}, {"ok", true}};
     }
+    std::string deployed_phrases() const {
+        const auto file = user() / L"r-ime-phrases.tsv";
+        auto text = fs::exists(file) ? read_file(file, 8 * 1024 * 1024) : std::string{};
+        (void)parse_phrases(text);
+        return text;
+    }
+    void rename_data_directory(const fs::path &source, const fs::path &destination) {
+        const auto root = fs::absolute(paths.data.parent_path()).lexically_normal();
+        require(fs::absolute(source).lexically_normal().parent_path() == root &&
+                    fs::absolute(destination).lexically_normal().parent_path() == root,
+                "data swap must remain in the private user directory");
+        const auto deadline = GetTickCount64() + 1000;
+        for (;;) {
+            // No REPLACE_EXISTING: a concurrent unexpected target must never
+            // be overwritten during either the swap or its rollback.
+            if (MoveFileExW(source.c_str(), destination.c_str(), 0))
+                return;
+            const std::error_code error(int(GetLastError()), std::system_category());
+            const bool transient =
+                error.category() == std::system_category() &&
+                (error.value() == ERROR_ACCESS_DENIED || error.value() == ERROR_SHARING_VIOLATION ||
+                 error.value() == ERROR_LOCK_VIOLATION);
+            // An existing target is a different conflict, not a temporary lock.
+            // Do not replace it or retry indefinitely under permanent permissions.
+            std::error_code target_error;
+            bool target_exists = fs::exists(destination, target_error);
+            auto now = GetTickCount64();
+            if (!transient || target_exists || now >= deadline)
+                throw fs::filesystem_error("data directory rename", source, destination, error);
+            Sleep(DWORD(std::min<ULONGLONG>(25, deadline - now)));
+        }
+    }
     void swap_stage(const fs::path &stage, const Json &next, const std::string &phrases,
                     bool keep_latest) {
         const auto old = paths.data.parent_path() / L".r-ime-data-old";
@@ -144,10 +178,10 @@ struct Worker {
             if (keep_latest)
                 copy_tree(user(), stage / L"rime", true);
             if (fs::exists(paths.data)) {
-                fs::rename(paths.data, old);
+                rename_data_directory(paths.data, old);
                 moved = true;
             }
-            fs::rename(stage, paths.data);
+            rename_data_directory(stage, paths.data);
             installed = true;
             config = next;
             start();
@@ -163,7 +197,7 @@ struct Worker {
             if (installed)
                 fs::remove_all(paths.data, ignored);
             if (moved)
-                fs::rename(old, paths.data);
+                rename_data_directory(old, paths.data);
             config = previous;
             save_config(paths.config, previous);
             if (startup_error.empty())
@@ -172,8 +206,33 @@ struct Worker {
         }
     }
     Json dispatch(const Json &request, std::unique_lock<std::mutex> &lock) {
+        const auto before = session_generation;
+        const bool had_engine = bool(engine);
+        try {
+            return dispatch_impl(request, lock);
+        } catch (const std::exception &error) {
+            auto reply = response(request);
+            reply["ok"] = false;
+            reply["error"] = error.what();
+            reply["sessions_invalidated"] = session_generation != before || (had_engine && !engine);
+            return reply;
+        }
+    }
+    Json dispatch_impl(const Json &request, std::unique_lock<std::mutex> &lock) {
         auto reply = response(request);
+        require(request.contains("version") && request.at("version").is_number_integer() &&
+                    request.at("version") == 1,
+                "unsupported protocol version");
         auto op = request.at("op").get<std::string>();
+        if (op == "configuration") {
+            require(request.value("session", uint64_t{}) == 0,
+                    "configuration snapshots require session zero");
+            reply["config"] = config;
+            reply["phrases"] = deployed_phrases();
+            reply["recovery_required"] = !startup_error.empty();
+            reply["diagnostic"] = startup_error;
+            return reply;
+        }
         if (op == "status" && request.value("session", uint64_t{}) == 0) {
             reply["config"] = config;
             reply["recovery_required"] = !startup_error.empty();
@@ -187,6 +246,21 @@ struct Worker {
                 "configuration requires explicit repair or backup restore: " + startup_error);
         if (op == "configure" || op == "restore") {
             require(!deploying, "another configuration deployment is running");
+            if (op == "configure") {
+                std::string conflict;
+                if (request.contains("expected_config") && request.at("expected_config") != config)
+                    conflict = "stale configuration snapshot";
+                else if (request.contains("expected_phrases") &&
+                         request.at("expected_phrases").get<std::string>() != deployed_phrases())
+                    conflict = "stale phrase snapshot";
+                if (!conflict.empty()) {
+                    reply["ok"] = false;
+                    reply["error"] = conflict;
+                    reply["error_code"] = "conflict";
+                    reply["sessions_invalidated"] = false;
+                    return reply;
+                }
+            }
             deploying = true;
             struct Guard {
                 bool &value;
@@ -197,24 +271,29 @@ struct Worker {
             auto stage = paths.data.parent_path() / L".r-ime-data-stage";
             if (fs::exists(stage))
                 fs::remove_all(stage);
-            auto next =
-                op == "configure" ? request.at("config") : request.at("backup").at("config");
-            validate_config(next);
+            auto next = normalize_config(op == "configure" ? request.at("config")
+                                                           : request.at("backup").at("config"));
             std::string phrases;
             if (op == "configure") {
-                phrases = request.contains("phrases") ? request.at("phrases").get<std::string>() :
-                    (fs::exists(paths.data / L"phrases.tsv") ? read_file(paths.data / L"phrases.tsv") : "");
+                phrases = request.contains("phrases")
+                              ? request.at("phrases").get<std::string>()
+                              : (fs::exists(paths.data / L"phrases.tsv")
+                                     ? read_file(paths.data / L"phrases.tsv")
+                                     : "");
                 parse_phrases(phrases);
             }
-            auto deployed = fs::exists(user() / L"r-ime-phrases.tsv")
-                                ? read_file(user() / L"r-ime-phrases.tsv")
-                                : "";
+            auto deployed = op == "configure" ? deployed_phrases() : std::string{};
             if (engine && op == "configure" && next["input"] == config["input"] &&
                 next["general"] == config["general"] &&
                 next["appearance"]["page_size"] == config["appearance"]["page_size"] &&
                 phrases == deployed) {
-                save_config(paths.config, next);
                 save_config(user() / L"r-ime-effective.json", next);
+                try {
+                    save_config(paths.config, next);
+                } catch (...) {
+                    save_config(user() / L"r-ime-effective.json", config);
+                    throw;
+                }
                 engine->update_config(next);
                 config = next;
                 reply["config"] = config;
@@ -388,7 +467,10 @@ int wmain(int argc, wchar_t **argv) {
                     try {
                         request = Json::parse(wire);
                         reply = worker.response(request);
-                        require(request.at("version") == 1, "unsupported protocol version");
+                        require(request.contains("version") &&
+                                    request.at("version").is_number_integer() &&
+                                    request.at("version") == 1,
+                                "unsupported protocol version");
                         auto serial = request.at("id").get<uint64_t>();
                         require(serial > sequence, "stale request sequence");
                         sequence = serial;
@@ -399,13 +481,14 @@ int wmain(int argc, wchar_t **argv) {
                         reply = worker.dispatch(request, lock);
                         if (reply.value("ok", false) && request["op"] == "create")
                             sessions.insert(reply.at("session").get<uint64_t>());
-                        if (request["op"] == "destroy")
+                        if (reply.value("ok", false) && request["op"] == "destroy")
                             sessions.erase(session);
-                        shutdown = request["op"] == "shutdown";
+                        shutdown = reply.value("ok", false) && request["op"] == "shutdown";
                     } catch (const std::exception &e) {
                         reply = worker.response(request.is_object() ? request : Json::object());
                         reply["ok"] = false;
                         reply["error"] = e.what();
+                        reply["sessions_invalidated"] = false;
                     }
                     wire = reply.dump();
                     length = DWORD(wire.size());

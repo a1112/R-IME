@@ -56,6 +56,33 @@ TMPDIR=/dev/shm RIME_TEST_EXEC_TMPDIR=/dev/shm ctest --test-dir build --output-o
 测试用户目录中的哨兵文件保持原内容。此段仅记录 Linux 暂存安装，
 Windows 本机安装与验证见 [Windows 指南](windows.md)。
 
+## 本地控制接口回归（2026-10-08）
+
+在同一独立 Debian 13 WSL 2 环境中，从冻结源码完成 Linux 全量构建（66 个构建步骤），
+包括 Fcitx 插件、Qt 设置程序、引擎、C++ 控制 SDK 与 `r-ime-ctl`。
+工具链为 GCC 14.2、CMake 3.31.6、Ninja 1.12.1；librime 1.13.1、Fcitx 5.1.12、
+Qt 6.8.2、nlohmann/json 3.11.3，未新增或修改系统软件包。
+
+本轮 **11 个自动化项目均实际通过**，覆盖上表 9 项及新增 `control-api`、`control-cli`。
+首次运行 6 项通过；5 项失败后定位为验证环境问题，并仅重跑这 5 项，全部通过，
+重跑耗时 **105.28 秒**。该时间不代表单次 11 项全套耗时。
+
+首次运行将临时 XDG 用户目录放在过长路径下，导致 `engine.sock` 超过 Unix socket
+地址长度上限；Qt smoke 另在平台插件枚举阶段出现冷启动读取停顿，未进入 QML。
+纠正为短的、权限 0700 的私有 `/dev/shm/ri-4c9a7a61` 临时目录，
+并将 `RIME_TEST_EXEC_TMPDIR` 指向同一内存文件系统后，通过原有测试。
+没有修改生产代码、测试断言或时限；Qt 离屏 smoke 实际耗时 56.40 秒（上限 60 秒）。
+此轮与历史记录相同，不能据此验证持久化磁盘断电恢复或真实桌面启动性能。
+
+新增检查验证发送前输入/帧大小校验、JSON Lines 连接保持和错误后继续请求、
+连接间会话隔离、全拼候选与中文提交、配置/短语快照冲突拒绝、
+Unicode 文件和短语、备份恢复及断开后不重放操作。
+Linux CMake 安装已在私有临时前缀完成，包含控制工具、公共头文件、
+三个静态库、导出 CMake package 和 C++/Python 示例。
+外部 C++ 项目仅通过已安装前缀的 `find_package(RIME)` 配置、编译和链接成功，
+并向真实私有 worker 查询状态；安装后的 Python JSON Lines 示例成功读取候选并提交“你好”。
+这两个示例均使用内存文件系统中的独立 XDG 用户数据，验证结束后停止了测试 worker。
+
 ## 必须在真实 KDE / Wayland 完成的发布检查
 
 以下项目尚未在当前 Windows/WSL 工作区验收，不能标记通过：

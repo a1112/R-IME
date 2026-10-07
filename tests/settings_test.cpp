@@ -29,6 +29,18 @@ class SettingsTest : public QObject {
         QVERIFY(!b.setValue("shortcuts", "cancel", "Shift"));
         QCOMPARE(b.value("shortcuts", "cancel").toString(), QString("Escape"));
     }
+    void fullWidthEditsAreBooleanAndStaged() {
+        QTemporaryDir dir;
+        SettingsBackend b(paths(dir), false);
+        QCOMPARE(b.value("general", "full_shape").toBool(), false);
+        QVERIFY(b.setValue("general", "full_shape", true));
+        QVERIFY(b.value("general", "full_shape").toBool());
+        QVERIFY(b.dirty());
+        QVERIFY(!b.setValue("general", "full_shape", "true"));
+        QVERIFY(b.value("general", "full_shape").toBool());
+        b.discard();
+        QCOMPARE(b.value("general", "full_shape").toBool(), false);
+    }
     void phraseEditingRejectsDuplicatesAndSupportsRemoval() {
         QTemporaryDir dir;
         SettingsBackend b(paths(dir), false);

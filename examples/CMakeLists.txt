@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22)
+project(RIMEControlExample LANGUAGES CXX)
+find_package(RIME 0.2 CONFIG REQUIRED)
+add_executable(r-ime-control-example control_client.cpp)
+target_link_libraries(r-ime-control-example PRIVATE RIME::control)

@@ -1,5 +1,6 @@
 #include "panel.hpp"
 #include <algorithm>
+#include <dwmapi.h>
 #include <stdexcept>
 #include <windowsx.h>
 namespace rime_ime::tsf {
@@ -22,13 +23,18 @@ Panel::~Panel() {
     UnregisterClassW(L"R-IME.CandidateWindow.v1", module_);
     if (font_)
         DeleteObject(font_);
+    if (labelFont_)
+        DeleteObject(labelFont_);
 }
 void Panel::hide() {
-    if (window_)
+    if (window_ && IsWindowVisible(window_)) {
+        NotifyWinEvent(EVENT_OBJECT_IME_HIDE, window_, OBJID_CLIENT, CHILDID_SELF);
         ShowWindow(window_, SW_HIDE);
+    }
     items_.clear();
+    lastState_ = nlohmann::json();
     scroll_ = maximumScroll_ = 0;
-    pressedAction_ = -99;
+    pressedAction_ = hovered_ = -99;
     ++revision_;
 }
 void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, RECT anchor,
@@ -45,12 +51,17 @@ void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, 
         cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         cls.style = CS_DROPSHADOW;
         RegisterClassExW(&cls);
-        window_ = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        window_ = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                                   cls.lpszClassName, L"R-IME candidates", WS_POPUP, 0, 0, 1, 1,
                                   owner, nullptr, module_, this);
         if (!window_)
             return;
     }
+    const bool wasVisible = IsWindowVisible(window_) != FALSE;
+    lastState_ = state;
+    lastAppearance_ = appearance;
+    lastAnchor_ = anchor;
+    lastOwner_ = owner;
     // The host's DPI awareness is respected; never change its process DPI mode.
     scale_ = owner ? GetDpiForWindow(owner) : 96;
     if (!scale_)
@@ -62,14 +73,33 @@ void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, 
                  L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                  L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
     dark_ = theme == "dark" || (theme == "system" && !light);
-    if (font_)
-        DeleteObject(font_);
+    HIGHCONTRASTW contrast{sizeof(contrast)};
+    SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0);
+    highContrast_ = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    accent_ = dark_ ? RGB(96, 205, 255) : RGB(0, 103, 192);
+    DWORD color = 0; BOOL opaque = FALSE;
+    if (!highContrast_ && SUCCEEDED(DwmGetColorizationColor(&color, &opaque)))
+        accent_ = RGB((color >> 16) & 255, (color >> 8) & 255, color & 255);
+    if (highContrast_)
+        accent_ = GetSysColor(COLOR_HIGHLIGHT);
+    BOOL darkFrame = dark_;
+    DwmSetWindowAttribute(window_, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkFrame, sizeof(darkFrame));
     auto face = wide(appearance.value("font", std::string{}));
     if (face.empty())
         face = L"Microsoft YaHei UI";
-    font_ = CreateFontW(-px(appearance.value("font_size", 16)), 0, 0, 0, FW_NORMAL, FALSE, FALSE,
-                        FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY, DEFAULT_PITCH, face.c_str());
+    const int fontSize = appearance.value("font_size", 16);
+    if (!font_ || fontFace_ != face || fontSize_ != fontSize || fontDpi_ != scale_) {
+        if (font_) DeleteObject(font_);
+        if (labelFont_) DeleteObject(labelFont_);
+        fontFace_ = face; fontSize_ = fontSize; fontDpi_ = scale_;
+        auto make = [&](int size) {
+            return CreateFontW(-px(size), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH, face.c_str());
+        };
+        font_ = make(fontSize);
+        labelFont_ = make(std::max(10, fontSize - 3));
+    }
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST), &monitor);
     int maxWidth = std::max(
@@ -84,25 +114,45 @@ void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, 
     items_.clear();
     selected_ = state.value("highlighted", 0);
     revision_ = revision;
-    bool vertical = appearance.value("orientation", "horizontal") == "vertical";
+    bool vertical = vertical_ = appearance.value("orientation", "horizontal") == "vertical";
+    previousPage_ = state.value("page", 0) > 0;
+    nextPage_ = !state.value("last_page", true);
+    int controls = (previousPage_ ? 1 : 0) + (nextPage_ ? 1 : 0);
+    int controlWidth = vertical ? 0 : controls * px(28);
+    int footer = vertical && controls ? px(30) : 0;
+    int available = std::max(px(48), maxWidth - px(16) - controlWidth);
+    hovered_ = -99;
     int count = static_cast<int>(state["candidates"].size());
+    int verticalWidth = px(160);
+    if (vertical)
+        for (int i = 0; i < count; ++i) {
+            auto text = wide(state["candidates"][i].value("text", ""));
+            SIZE measured{};
+            GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()), &measured);
+            verticalWidth = std::max<int>(verticalWidth, measured.cx + px(44));
+        }
+    verticalWidth = std::min(available, verticalWidth);
     for (int i = 0; i < count; ++i) {
-        auto text = std::to_wstring(i + 1) + L"  " + wide(state["candidates"][i].value("text", ""));
+        auto text = wide(state["candidates"][i].value("text", ""));
+        auto comment = wide(state["candidates"][i].value("comment", ""));
         SIZE size{};
         GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()), &size);
-        int width = std::min<int>(maxWidth - px(16), size.cx + px(24));
+        int commentWidth = comment.empty() ? 0 : px(64);
+        int width = std::min<int>(available, size.cx + px(40) + commentWidth);
         if (vertical)
-            width = maxWidth - px(16);
-        RECT measured{0, 0, width - px(24), 0};
+            width = verticalWidth;
+        commentWidth = std::min(commentWidth, width / 3);
+        RECT measured{0, 0, std::max(1, width - px(40) - commentWidth), 0};
         DrawTextW(dc, text.data(), static_cast<int>(text.size()), &measured,
                   DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
-        int row = std::max<int>(metrics.tmHeight, measured.bottom) + px(20);
-        if (x + width + px(8) > maxWidth && x > px(8)) {
+        int row = std::max<int>(metrics.tmHeight, measured.bottom) + px(12);
+        if (x + width > available + px(8) && x > px(8)) {
             x = px(8);
             y += rowHeight + gap;
             rowHeight = 0;
         }
-        items_.push_back({{x, y, x + width, y + row}, std::move(text), i});
+        items_.push_back({{x, y, x + width, y + row}, std::move(text),
+                          std::to_wstring(i + 1), std::move(comment), i});
         usedWidth = std::max(usedWidth, x + width);
         rowHeight = std::max(rowHeight, row);
         if (vertical) {
@@ -115,10 +165,10 @@ void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, 
     int bottom = px(8);
     for (const auto &item : items_)
         bottom = std::max<int>(bottom, item.rect.bottom);
-    width_ = std::max(px(180), usedWidth + px(8));
-    height_ = std::min(maxHeight, bottom + px(38));
+    width_ = std::min(maxWidth, std::max(px(100), usedWidth + px(8) + controlWidth));
+    height_ = std::min(maxHeight, bottom + px(8) + footer);
     viewportTop_ = px(8);
-    viewportBottom_ = height_ - px(38);
+    viewportBottom_ = height_ - px(8) - footer;
     maximumScroll_ = std::max(0, bottom - viewportBottom_);
     scroll_ = std::clamp(scroll_, 0, maximumScroll_);
     if (selected_ >= 0 && selected_ < count) {
@@ -130,15 +180,15 @@ void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, 
             scroll_ = selected.bottom - viewportBottom_;
         scroll_ = std::clamp(scroll_, 0, maximumScroll_);
     }
-    std::wstring status = state.value("ascii", false) ? L"A" : L"中";
-    status += L"   " + std::to_wstring(state.value("page", 0) + 1);
-    items_.push_back({{px(12), height_ - px(30), width_ - px(86), height_ - px(6)}, status, -10});
-    if (state.value("page", 0) > 0)
-        items_.push_back(
-            {{width_ - px(76), height_ - px(32), width_ - px(44), height_ - px(4)}, L"‹", -1});
-    if (!state.value("last_page", true))
-        items_.push_back(
-            {{width_ - px(40), height_ - px(32), width_ - px(8), height_ - px(4)}, L"›", -2});
+    int controlLeft = width_ - px(8) - controls * px(28);
+    int controlTop = vertical ? height_ - footer : px(8);
+    auto addControl = [&](int action, const wchar_t *text) {
+        items_.push_back({{controlLeft, controlTop, controlLeft + px(28), controlTop + px(28)},
+                          text, {}, {}, action});
+        controlLeft += px(28);
+    };
+    if (previousPage_) addControl(-1, L"‹");
+    if (nextPage_) addControl(-2, L"›");
     SelectObject(dc, oldFont);
     ReleaseDC(window_, dc);
     int left = std::clamp<int>(anchor.left, monitor.rcWork.left,
@@ -146,12 +196,15 @@ void Panel::show(const nlohmann::json &state, const nlohmann::json &appearance, 
     int top = anchor.bottom + px(4);
     if (top + height_ > monitor.rcWork.bottom)
         top = anchor.top - height_ - px(4);
-    top = std::max<int>(monitor.rcWork.top, top);
-    SetWindowRgn(window_, CreateRoundRectRgn(0, 0, width_ + 1, height_ + 1, px(20), px(20)), FALSE);
+    top = std::clamp<int>(top, monitor.rcWork.top,
+        std::max(monitor.rcWork.top, monitor.rcWork.bottom - height_));
+    SetWindowRgn(window_, CreateRoundRectRgn(0, 0, width_ + 1, height_ + 1, px(16), px(16)), FALSE);
     SetWindowLongPtrW(window_, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
-    SetWindowPos(window_, HWND_TOPMOST, left, top, width_, height_,
+    SetWindowPos(window_, HWND_TOP, left, top, width_, height_,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(window_, nullptr, FALSE);
+    NotifyWinEvent(wasVisible ? EVENT_OBJECT_IME_CHANGE : EVENT_OBJECT_IME_SHOW,
+                   window_, OBJID_CLIENT, CHILDID_SELF);
 }
 void Panel::paint() {
     PAINTSTRUCT ps;
@@ -159,16 +212,17 @@ void Panel::paint() {
     HDC buffer = CreateCompatibleDC(dc);
     HBITMAP bitmap = CreateCompatibleBitmap(dc, width_, height_);
     auto oldBitmap = SelectObject(buffer, bitmap);
-    COLORREF background = dark_ ? RGB(38, 39, 43) : RGB(250, 250, 252),
-             foreground = dark_ ? RGB(239, 240, 242) : RGB(40, 43, 48);
+    COLORREF background = highContrast_ ? GetSysColor(COLOR_WINDOW) : dark_ ? RGB(44,44,44) : RGB(255,255,255),
+             foreground = highContrast_ ? GetSysColor(COLOR_WINDOWTEXT) : dark_ ? RGB(255,255,255) : RGB(26,26,26),
+             muted = highContrast_ ? foreground : dark_ ? RGB(181,181,181) : RGB(96,96,96);
     auto brush = CreateSolidBrush(background);
     RECT bounds{0, 0, width_, height_};
     FillRect(buffer, &bounds, brush);
     DeleteObject(brush);
-    HPEN pen = CreatePen(PS_SOLID, 1, dark_ ? RGB(75, 76, 81) : RGB(211, 213, 218));
+    HPEN pen = CreatePen(PS_SOLID, 1, highContrast_ ? foreground : dark_ ? RGB(72,72,72) : RGB(214,214,214));
     auto oldPen = SelectObject(buffer, pen);
     auto oldBrush = SelectObject(buffer, GetStockObject(NULL_BRUSH));
-    RoundRect(buffer, 0, 0, width_, height_, MulDiv(20, scale_, 96), MulDiv(20, scale_, 96));
+    RoundRect(buffer, 0, 0, width_, height_, MulDiv(16, scale_, 96), MulDiv(16, scale_, 96));
     SelectObject(buffer, oldBrush);
     SelectObject(buffer, oldPen);
     DeleteObject(pen);
@@ -183,26 +237,54 @@ void Panel::paint() {
             IntersectClipRect(buffer, 0, viewportTop_, width_, viewportBottom_);
         }
         bool selected = item.action >= 0 && item.action == selected_;
-        if (selected) {
-            auto selectedBrush = CreateSolidBrush(RGB(48, 119, 232));
+        bool hovered = item.action == hovered_;
+        if (selected || hovered) {
+            auto selectedBrush = CreateSolidBrush(highContrast_ ? GetSysColor(COLOR_HIGHLIGHT) :
+                dark_ ? (selected ? RGB(62,62,62) : RGB(55,55,55)) :
+                        (selected ? RGB(240,240,240) : RGB(247,247,247)));
             auto previous = SelectObject(buffer, selectedBrush);
             auto previousPen = SelectObject(buffer, GetStockObject(NULL_PEN));
             RoundRect(buffer, itemRect.left, itemRect.top, itemRect.right, itemRect.bottom,
-                      MulDiv(12, scale_, 96), MulDiv(12, scale_, 96));
+                      MulDiv(8, scale_, 96), MulDiv(8, scale_, 96));
             SelectObject(buffer, previous);
             SelectObject(buffer, previousPen);
             DeleteObject(selectedBrush);
         }
-        SetTextColor(buffer, selected ? RGB(255, 255, 255) : foreground);
+        auto px = [&](int n){ return std::max(1, MulDiv(n, scale_, 96)); };
+        if (selected && !highContrast_) {
+            RECT indicator = vertical_ ?
+                RECT{itemRect.left, itemRect.top + px(6), itemRect.left + px(3), itemRect.bottom - px(6)} :
+                RECT{itemRect.left + px(8), itemRect.bottom - px(3), itemRect.right - px(8), itemRect.bottom};
+            auto mark = CreateSolidBrush(accent_);
+            FillRect(buffer, &indicator, mark); DeleteObject(mark);
+        }
+        COLORREF textColor = highContrast_ && (selected || hovered) ? GetSysColor(COLOR_HIGHLIGHTTEXT) : foreground;
+        SetTextColor(buffer, textColor);
         RECT text = itemRect;
-        text.left += MulDiv(12, scale_, 96);
-        text.right -= MulDiv(12, scale_, 96);
+        text.left += px(8);
+        text.right -= px(8);
         if (candidate) {
-            text.top += MulDiv(10, scale_, 96);
-            text.bottom -= MulDiv(10, scale_, 96);
+            text.top += px(6);
+            text.bottom -= px(6);
+            RECT label = text;
+            label.right = label.left + px(22);
+            SelectObject(buffer, labelFont_);
+            SetTextColor(buffer, highContrast_ ? textColor : muted);
+            DrawTextW(buffer, item.label.data(), static_cast<int>(item.label.size()), &label,
+                      DT_NOPREFIX | DT_SINGLELINE);
+            text.left += px(22);
+            if (!item.comment.empty()) {
+                int commentWidth = std::min<int>(px(64), (itemRect.right - itemRect.left) / 3);
+                RECT comment = text; comment.left = comment.right - commentWidth;
+                DrawTextW(buffer, item.comment.data(), static_cast<int>(item.comment.size()), &comment,
+                          DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS);
+                text.right -= commentWidth;
+            }
+            SelectObject(buffer, font_);
+            SetTextColor(buffer, textColor);
         }
         DrawTextW(buffer, item.text.data(), static_cast<int>(item.text.size()), &text,
-                  DT_NOPREFIX | (candidate ? DT_WORDBREAK : DT_SINGLELINE | DT_VCENTER));
+                  DT_NOPREFIX | (candidate ? DT_WORDBREAK : DT_SINGLELINE | DT_VCENTER | DT_CENTER));
         RestoreDC(buffer, saved);
     }
     if (maximumScroll_ > 0) {
@@ -252,7 +334,33 @@ LRESULT CALLBACK Panel::procedure(HWND window, UINT message, WPARAM w, LPARAM l)
     case WM_PAINT:
         self->paint();
         return 0;
+    case WM_MOUSEMOVE: {
+        if (!self->trackingMouse_) {
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+            self->trackingMouse_ = TrackMouseEvent(&tracking) != FALSE;
+        }
+        int item = self->hit({GET_X_LPARAM(l), GET_Y_LPARAM(l)});
+        if (item != self->hovered_) {
+            self->hovered_ = item;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        self->trackingMouse_ = false;
+        self->hovered_ = -99;
+        self->pressedAction_ = -99;
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    case WM_CANCELMODE:
+    case WM_CAPTURECHANGED:
+        self->pressedAction_ = -99;
+        return 0;
     case WM_LBUTTONDOWN:
+        if (!self->trackingMouse_) {
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+            self->trackingMouse_ = TrackMouseEvent(&tracking) != FALSE;
+        }
         self->pressedAction_ = self->hit({GET_X_LPARAM(l), GET_Y_LPARAM(l)});
         self->pressedRevision_ = self->revision_;
         return 0;
@@ -271,8 +379,16 @@ LRESULT CALLBACK Panel::procedure(HWND window, UINT message, WPARAM w, LPARAM l)
                 MulDiv(GET_WHEEL_DELTA_WPARAM(w), MulDiv(72, self->scale_, 96), WHEEL_DELTA);
             self->scroll_ = std::clamp(self->scroll_ - delta, 0, self->maximumScroll_);
             InvalidateRect(window, nullptr, FALSE);
-        } else
+        } else if (GET_WHEEL_DELTA_WPARAM(w) > 0 ? self->previousPage_ : self->nextPage_)
             self->action_(GET_WHEEL_DELTA_WPARAM(w) > 0 ? -1 : -2, self->revision_);
+        return 0;
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+    case WM_DPICHANGED:
+        if (IsWindowVisible(window) && !self->lastState_.is_null()) {
+            auto state = self->lastState_, appearance = self->lastAppearance_;
+            self->show(state, appearance, self->lastAnchor_, self->lastOwner_, self->revision_);
+        }
         return 0;
     case WM_NCDESTROY:
         self->window_ = nullptr;

@@ -44,7 +44,18 @@ Json empty_reply(const Json &req) {
             {"page", 0},
             {"last_page", true},
             {"ascii", false},
+            {"full_shape", false},
+            {"ascii_punctuation", false},
             {"simplified", true}};
+}
+template <class Api>
+bool highlight_candidate(Api *api, RimeSessionId id, std::size_t index, bool backward) {
+    // New librime exposes explicit selection independent of schema key bindings.
+    // Older supported Linux headers keep their established selector behavior.
+    if constexpr (requires { api->highlight_candidate; })
+        if (RIME_API_AVAILABLE(api, highlight_candidate))
+            return bool(api->highlight_candidate(id, index));
+    return bool(api->process_key(id, backward ? 0xff52 : 0xff54, 0));
 }
 } // namespace
 void prepare_schemas(const fs::path &overlay, const fs::path &user, const Json &cfg) {
@@ -121,8 +132,7 @@ struct Engine::Impl {
     std::map<std::uint64_t, Session> sessions;
     std::uint64_t generation = next_generation++;
     Impl(fs::path s, fs::path u, Json c)
-        : shared(path_utf8(s)), user(path_utf8(u)), config(std::move(c)) {
-        validate_config(config);
+        : shared(path_utf8(s)), user(path_utf8(u)), config(normalize_config(std::move(c))) {
         auto traits = traits_for(shared, user);
         api->setup(&traits);
         api->initialize(&traits);
@@ -149,6 +159,7 @@ struct Engine::Impl {
         const auto &g = config["general"];
         api->set_option(session.rime, "ascii_mode", g["ascii"].get<bool>());
         api->set_option(session.rime, "simplification", g["simplified"].get<bool>());
+        api->set_option(session.rime, "full_shape", g.value("full_shape", false));
         api->set_option(session.rime, "ascii_punct", g["ascii_punctuation"].get<bool>());
         api->set_option(session.rime, "_no_learning",
                         session.sensitive || !g["learning"].get<bool>());
@@ -175,6 +186,8 @@ struct Engine::Impl {
             api->free_context(&context);
         }
         reply["ascii"] = bool(api->get_option(id, "ascii_mode"));
+        reply["full_shape"] = bool(api->get_option(id, "full_shape"));
+        reply["ascii_punctuation"] = bool(api->get_option(id, "ascii_punct"));
         reply["simplified"] = bool(api->get_option(id, "simplification"));
         char current[128]{};
         if (api->get_current_schema(id, current, sizeof(current)))
@@ -184,6 +197,25 @@ struct Engine::Impl {
         const char *input = api->get_input(id);
         reply["commit"] = input ? input : "";
         api->clear_composition(id);
+    }
+    bool navigate(RimeSessionId id, bool backward) {
+        RIME_STRUCT(RimeContext, context);
+        if (!api->get_context(id, &context))
+            return false;
+        const auto &menu = context.menu;
+        bool has_menu = menu.num_candidates > 0 && menu.page_size > 0;
+        auto current = std::size_t(std::max(0, menu.page_no)) * std::size_t(menu.page_size) +
+                       std::size_t(std::max(0, menu.highlighted_candidate_index));
+        bool boundary = backward ? current == 0
+                                 : menu.is_last_page &&
+                                       menu.highlighted_candidate_index >= menu.num_candidates - 1;
+        api->free_context(&context);
+        if (!has_menu)
+            return false;
+        if (!boundary)
+            (void)highlight_candidate(api, id, backward ? current - 1 : current + 1, backward);
+        // Arrow keys stay with the candidate menu at its ends, too.
+        return true;
     }
     Json run(const Json &req) {
         auto reply = empty_reply(req);
@@ -266,9 +298,25 @@ struct Engine::Impl {
             } else if (op == "page")
                 reply["handled"] =
                     bool(api->process_key(id, req.value("backward", false) ? 0xff55 : 0xff56, 0));
-            else if (op == "toggle_ascii") {
-                raw_commit(id, reply);
-                api->set_option(id, "ascii_mode", !api->get_option(id, "ascii_mode"));
+            else if (op == "navigate")
+                reply["handled"] = navigate(id, req.value("backward", false));
+            else if (op == "toggle_ascii" || op == "set_ascii") {
+                bool current = bool(api->get_option(id, "ascii_mode"));
+                bool next = op == "set_ascii" ? req.at("value").get<bool>() : !current;
+                if (current != next) {
+                    raw_commit(id, reply);
+                    api->set_option(id, "ascii_mode", next);
+                }
+                reply["handled"] = true;
+            } else if (op == "toggle_full_shape" || op == "set_full_shape") {
+                bool next = op == "set_full_shape" ? req.at("value").get<bool>()
+                                                    : !api->get_option(id, "full_shape");
+                api->set_option(id, "full_shape", next);
+                reply["handled"] = true;
+            } else if (op == "toggle_ascii_punctuation" || op == "set_ascii_punctuation") {
+                bool next = op == "set_ascii_punctuation" ? req.at("value").get<bool>()
+                                                           : !api->get_option(id, "ascii_punct");
+                api->set_option(id, "ascii_punct", next);
                 reply["handled"] = true;
             } else if (op == "toggle_simplified") {
                 api->set_option(id, "simplification", !api->get_option(id, "simplification"));
@@ -298,8 +346,7 @@ Json Engine::dispatch(const Json &request) {
     return impl_->run(request);
 }
 void Engine::update_config(const Json &config) {
-    validate_config(config);
-    impl_->config = config;
+    impl_->config = normalize_config(config);
 }
 void Engine::sync() {
     impl_->api->sync_user_data();

@@ -106,7 +106,7 @@ nlohmann::json Client::call(nlohmann::json request, int timeout_ms) {
              reply.at("session") != request["session"]))
             throw std::runtime_error("输入引擎响应序列失效");
         if (!reply.value("ok", false))
-            throw RpcError(reply.value("error", std::string("输入引擎操作失败")));
+            throw RpcError(reply.value("error", std::string("输入引擎操作失败")), reply);
         return reply;
     } catch (const RpcError &) {
         throw;

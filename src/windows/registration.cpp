@@ -41,6 +41,8 @@ std::wstring registered_dll() {
     return value;
 }
 constexpr const GUID *categories[] = {&GUID_TFCAT_TIP_KEYBOARD, &GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                                      &GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
+                                      &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
                                       &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT};
 void enable_user_layout(bool enable) {
     // Windows' modern keyboard list is maintained by Input.dll. Enabling only

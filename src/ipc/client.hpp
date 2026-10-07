@@ -8,6 +8,14 @@ namespace rime_ime {
 class RpcError : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
+    RpcError(const std::string &message, nlohmann::json reply)
+        : std::runtime_error(message), reply_(std::move(reply)) {}
+    const nlohmann::json &reply() const {
+        return reply_;
+    }
+
+  private:
+    nlohmann::json reply_ = nlohmann::json::object();
 };
 class Client {
   public:

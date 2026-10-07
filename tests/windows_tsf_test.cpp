@@ -1,5 +1,7 @@
 #include "client.hpp"
 #include <algorithm>
+#include <ctffunc.h>
+#include <ctfutb.h>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -25,6 +27,128 @@ static void hr(HRESULT value, const char *what) {
         std::cerr << what << ": HRESULT 0x" << std::hex << value << std::dec << '\n';
         throw std::runtime_error(what);
     }
+}
+// A host-side sink exercises the public TSF candidate protocol. The host may
+// take over rendering at any point, including while a composition is active.
+class CandidateHost final : public ITfUIElementSink {
+    ULONG refs_ = 1;
+
+  public:
+    bool allowWindow = true;
+    DWORD element = 0;
+    int begins = 0, updates = 0, ends = 0;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **p) override {
+        if (!p)
+            return E_POINTER;
+        *p = nullptr;
+        if (id == IID_IUnknown || id == IID_ITfUIElementSink)
+            *p = static_cast<ITfUIElementSink *>(this);
+        if (!*p)
+            return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return ++refs_;
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        auto count = --refs_;
+        if (!count)
+            delete this;
+        return count;
+    }
+    HRESULT STDMETHODCALLTYPE BeginUIElement(DWORD id, BOOL *show) override {
+        element = id;
+        ++begins;
+        *show = allowWindow;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE UpdateUIElement(DWORD id) override {
+        if (id == element)
+            ++updates;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE EndUIElement(DWORD id) override {
+        if (id == element)
+            ++ends;
+        return S_OK;
+    }
+};
+static void candidate_contract(const wchar_t *path) {
+    hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), "COM initialize contract host");
+    auto dll = LoadLibraryW(path);
+    check(dll, "load requested TSF DLL for public-interface contract");
+    using GetFactory = HRESULT(WINAPI *)(REFCLSID, REFIID, void **);
+    auto getFactory = reinterpret_cast<GetFactory>(GetProcAddress(dll, "DllGetClassObject"));
+    check(getFactory, "class factory export");
+    ComPtr<IClassFactory> factory;
+    hr(getFactory(service_id, IID_PPV_ARGS(&factory)), "contract class factory");
+    ComPtr<ITfTextInputProcessorEx> service;
+    hr(factory->CreateInstance(nullptr, IID_PPV_ARGS(&service)), "contract text service");
+    ComPtr<ITfCandidateListUIElementBehavior> candidates;
+    hr(service.As(&candidates), "TIP exposes Windows candidate-list behavior");
+    UINT count = 99, selection = 99;
+    hr(candidates->GetCount(&count), "candidate count before composition");
+    check(count == 0, "inactive TIP exposes no stale candidate strings");
+    check(candidates->GetSelection(&selection) == S_FALSE,
+          "inactive candidate list has no selected item");
+    check(FAILED(candidates->SetSelection(0)), "inactive candidate selection is rejected");
+    ComPtr<ITfLangBarItem> bar;
+    hr(service.As(&bar), "Windows input-mode language bar item");
+    TF_LANGBARITEMINFO info{};
+    hr(bar->GetInfo(&info), "input-mode language bar metadata");
+    check(info.guidItem == GUID_LBI_INPUTMODE, "mode item uses Windows' canonical input-mode GUID");
+    ComPtr<ITfDisplayAttributeProvider> attributes;
+    hr(service.As(&attributes), "TIP exposes native Windows preedit display attributes");
+    ComPtr<IEnumTfDisplayAttributeInfo> attributeEnum;
+    hr(attributes->EnumDisplayAttributeInfo(&attributeEnum), "enumerate native preedit attributes");
+    ComPtr<ITfDisplayAttributeInfo> attribute;
+    ULONG fetched = 0;
+    hr(attributeEnum->Next(1, &attribute, &fetched), "native input display attribute");
+    check(fetched == 1 && attribute, "one input-style display attribute is available");
+    TF_DISPLAYATTRIBUTE style{};
+    hr(attribute->GetAttributeInfo(&style), "native preedit style");
+    check(style.lsStyle == TF_LS_SOLID && !style.fBoldLine && style.bAttr == TF_ATTR_INPUT,
+          "unconverted preedit uses a fine Windows input underline");
+    GUID attributeId{};
+    hr(attribute->GetGUID(&attributeId), "native preedit attribute identity");
+    ComPtr<ITfDisplayAttributeInfo> byId;
+    hr(attributes->GetDisplayAttributeInfo(attributeId, &byId),
+       "lookup the enumerated style by GUID");
+    check(attributes->GetDisplayAttributeInfo(GUID_NULL, byId.ReleaseAndGetAddressOf()) ==
+              E_INVALIDARG,
+          "display provider rejects unrelated attribute identities");
+    attribute.Reset();
+    attributeEnum.Reset();
+    attributes.Reset();
+    ComPtr<ITfFunctionProvider> provider;
+    hr(service.As(&provider), "TIP exposes the Windows settings function provider");
+    GUID providerType{};
+    hr(provider->GetType(&providerType), "settings provider identity");
+    check(providerType == service_id, "settings function provider identifies R-IME");
+    ComPtr<IUnknown> function;
+    hr(provider->GetFunction(GUID_NULL, IID_ITfFnConfigure, &function),
+       "Windows obtains the input-method properties function");
+    ComPtr<ITfFnConfigure> configure;
+    hr(function.As(&configure), "input-method properties interface");
+    BSTR displayName = nullptr;
+    hr(configure->GetDisplayName(&displayName), "input-method properties display name");
+    check(displayName && SysStringLen(displayName) > 0, "settings function has a readable name");
+    SysFreeString(displayName);
+    check(configure->Show(nullptr, 0x0804, GUID_NULL) == E_INVALIDARG,
+          "settings invocation for an unrelated profile is rejected before launch");
+    function.Reset();
+    check(provider->GetFunction(profile_id, IID_ITfFnConfigure, &function) == E_NOINTERFACE &&
+              !function,
+          "settings provider rejects unsupported function namespace");
+    configure.Reset();
+    provider.Reset();
+    bar.Reset();
+    candidates.Reset();
+    service.Reset();
+    factory.Reset();
+    FreeLibrary(dll);
+    CoUninitialize();
 }
 class TrackingFactory final : public IClassFactory {
     ULONG refs_ = 1;
@@ -70,6 +194,7 @@ class Store final : public ITextStoreACP {
     ULONG refs_ = 1;
     ComPtr<ITextStoreACPSink> sink_;
     bool locked_ = false;
+    DWORD pendingLock_ = 0;
 
   public:
     HWND window;
@@ -77,6 +202,8 @@ class Store final : public ITextStoreACP {
     LONG start = 0, end = 0;
     bool readonly = false;
     bool deferLocks = false;
+    bool failTextWrites = false;
+    POINT layoutOrigin{100, 100};
     explicit Store(HWND w) : window(w) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **p) override {
         if (!p)
@@ -110,6 +237,8 @@ class Store final : public ITextStoreACP {
             return E_UNEXPECTED;
         if (deferLocks) {
             *result = (flags & TS_LF_SYNC) ? TS_E_SYNCHRONOUS : TS_S_ASYNC;
+            if (!(flags & TS_LF_SYNC))
+                pendingLock_ = flags;
             return S_OK;
         }
         if (locked_) {
@@ -120,6 +249,18 @@ class Store final : public ITextStoreACP {
         *result = sink_->OnLockGranted(flags);
         locked_ = false;
         return S_OK;
+    }
+    bool hasDeferredLock() const {
+        return pendingLock_ != 0;
+    }
+    void grantDeferredLock() {
+        if (!pendingLock_)
+            return;
+        auto flags = pendingLock_;
+        pendingLock_ = 0;
+        locked_ = true;
+        hr(sink_->OnLockGranted(flags), "grant pending application edit lock");
+        locked_ = false;
     }
     HRESULT STDMETHODCALLTYPE GetStatus(TS_STATUS *s) override {
         s->dwDynamicFlags = readonly ? TS_SD_READONLY : 0;
@@ -169,6 +310,8 @@ class Store final : public ITextStoreACP {
     }
     HRESULT STDMETHODCALLTYPE SetText(DWORD, LONG a, LONG b, const WCHAR *s, ULONG n,
                                       TS_TEXTCHANGE *change) override {
+        if (failTextWrites)
+            return E_FAIL;
         if (a < 0 || b < a || b > static_cast<LONG>(text.size()))
             return TS_E_INVALIDPOS;
         text.replace(a, b - a, s, n);
@@ -247,7 +390,8 @@ class Store final : public ITextStoreACP {
     }
     HRESULT STDMETHODCALLTYPE GetTextExt(TsViewCookie, LONG a, LONG b, RECT *r,
                                          BOOL *clipped) override {
-        *r = {100 + a * 10, 100, 110 + b * 10, 124};
+        *r = {layoutOrigin.x + a * 10, layoutOrigin.y, layoutOrigin.x + 10 + b * 10,
+              layoutOrigin.y + 24};
         *clipped = FALSE;
         return S_OK;
     }
@@ -292,7 +436,7 @@ static bool start_installed_worker(const std::filesystem::path &directory, HANDL
     ownedProcess = process.hProcess;
     return true;
 }
-static void installed_test() {
+static void installed_test(bool uiLess) {
     hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), "COM initialize");
     struct ComCleanup {
         ~ComCleanup() {
@@ -321,7 +465,23 @@ static void installed_test() {
     hr(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&manager)),
        "create TSF thread manager");
     TfClientId client;
-    hr(manager->Activate(&client), "activate TSF thread manager");
+    if (uiLess) {
+        ComPtr<ITfThreadMgrEx> extended;
+        hr(manager.As(&extended), "UI-less TSF thread manager");
+        hr(extended->ActivateEx(&client, TF_TMAE_UIELEMENTENABLEDONLY),
+           "activate UI-less TSF host");
+    } else
+        hr(manager->Activate(&client), "activate TSF thread manager");
+    ComPtr<ITfSource> threadSource;
+    hr(manager.As(&threadSource), "installed candidate event source");
+    ComPtr<CandidateHost> candidateHost;
+    candidateHost.Attach(new CandidateHost);
+    candidateHost->allowWindow = !uiLess;
+    DWORD candidateCookie;
+    hr(threadSource->AdviseSink(IID_ITfUIElementSink, candidateHost.Get(), &candidateCookie),
+       "installed host candidate UI sink");
+    ComPtr<ITfUIElementMgr> uiManager;
+    hr(manager.As(&uiManager), "installed candidate UI manager");
     ComPtr<ITfMessagePump> messagePump;
     hr(manager.As(&messagePump), "query TSF message pump");
     tsfMessagePump = messagePump.Get();
@@ -368,6 +528,14 @@ static void installed_test() {
        "query active installed profile");
     check(active.clsid == service_id && active.guidProfile == profile_id,
           "R-IME is the process's active keyboard profile");
+    ComPtr<ITfFunctionProvider> installedFunctions;
+    hr(manager->GetFunctionProvider(service_id, &installedFunctions),
+       "Windows obtains the installed settings function provider");
+    ComPtr<IUnknown> installedConfigure;
+    hr(installedFunctions->GetFunction(GUID_NULL, IID_ITfFnConfigure, &installedConfigure),
+       "installed provider exposes Windows input-method properties");
+    installedConfigure.Reset();
+    installedFunctions.Reset();
     ComPtr<ITfKeystrokeMgr> keys;
     hr(manager.As(&keys), "get Windows keystroke dispatcher");
     bool ready = false;
@@ -411,20 +579,57 @@ static void installed_test() {
         key(keycode);
     check(!store->text.empty(), "installed DLL writes inline preedit through TSF");
     auto candidateWindow = FindWindowW(L"R-IME.CandidateWindow.v1", nullptr);
-    check(candidateWindow && IsWindowVisible(candidateWindow),
-          "installed candidate window is visible while composing");
-    DWORD candidateProcess = 0;
-    GetWindowThreadProcessId(candidateWindow, &candidateProcess);
-    check(candidateProcess == GetCurrentProcessId(), "candidate belongs to this test host");
-    RECT candidateBounds{};
-    GetWindowRect(candidateWindow, &candidateBounds);
-    check(candidateBounds.right > candidateBounds.left &&
-              candidateBounds.bottom > candidateBounds.top &&
-              MonitorFromRect(&candidateBounds, MONITOR_DEFAULTTONULL),
-          "candidate window has a nonempty on-screen rectangle");
+    if (uiLess)
+        check(!candidateWindow || !IsWindowVisible(candidateWindow),
+              "UI-less host denying visibility gets no input-method candidate window");
+    else {
+        check(candidateWindow && IsWindowVisible(candidateWindow),
+              "installed candidate window is visible while composing");
+        DWORD candidateProcess = 0;
+        GetWindowThreadProcessId(candidateWindow, &candidateProcess);
+        check(candidateProcess == GetCurrentProcessId(), "candidate belongs to this test host");
+        RECT candidateBounds{};
+        GetWindowRect(candidateWindow, &candidateBounds);
+        check(candidateBounds.right > candidateBounds.left &&
+                  candidateBounds.bottom > candidateBounds.top &&
+                  MonitorFromRect(&candidateBounds, MONITOR_DEFAULTTONULL),
+              "candidate window has a nonempty on-screen rectangle");
+    }
+    check(candidateHost->begins > 0 && candidateHost->updates > 0,
+          "installed host receives candidate UI lifecycle");
+    ComPtr<ITfUIElement> currentUi;
+    hr(uiManager->GetUIElement(candidateHost->element, &currentUi),
+       "installed host gets candidate UI");
+    ComPtr<ITfCandidateListUIElementBehavior> currentCandidates;
+    hr(currentUi.As(&currentCandidates), "installed candidate behavior");
+    BSTR firstCandidate = nullptr;
+    hr(currentCandidates->GetString(0, &firstCandidate), "installed host reads Chinese candidate");
+    std::wstring firstText(firstCandidate, SysStringLen(firstCandidate));
+    SysFreeString(firstCandidate);
+    check(firstText == L"你好", "host UI receives the actual Rime Chinese candidate");
     key(VK_SPACE);
     check(store->text == L"你好", "installed profile commits Chinese via Windows dispatch");
     check(!IsWindowVisible(candidateWindow), "committing hides the candidate window");
+    check(candidateHost->ends > 0, "installed commit ends the candidate UI element");
+    currentCandidates.Reset();
+    currentUi.Reset();
+    if (uiLess) {
+        candidateHost->allowWindow = true;
+        for (auto code : std::wstring(L"NIHAO"))
+            key(code);
+        candidateWindow = FindWindowW(L"R-IME.CandidateWindow.v1", nullptr);
+        check(candidateWindow && IsWindowVisible(candidateWindow),
+              "UI-less host granting visibility permits the input method's own candidates");
+        hr(uiManager->GetUIElement(candidateHost->element, &currentUi),
+           "host retrieves allowed UI");
+        hr(currentUi->Show(FALSE), "host hides active candidate window");
+        check(!IsWindowVisible(candidateWindow), "active UI Show(FALSE) is respected");
+        hr(currentUi->Show(TRUE), "host restores active candidate window");
+        pump();
+        check(IsWindowVisible(candidateWindow), "active UI Show(TRUE) is respected");
+        key(VK_ESCAPE);
+        currentUi.Reset();
+    }
     key('N');
     key(VK_ESCAPE);
     check(store->text == L"你好", "installed profile cancels without extra text");
@@ -432,6 +637,10 @@ static void installed_test() {
                                    nullptr, TF_IPPMF_FORPROCESS),
        "deactivate installed profile");
     keys.Reset();
+    threadSource->UnadviseSink(candidateCookie);
+    candidateHost.Reset();
+    uiManager.Reset();
+    threadSource.Reset();
     document->Pop(TF_POPF_ALL);
     context.Reset();
     document.Reset();
@@ -442,9 +651,25 @@ static void installed_test() {
                  "inline preedit, Chinese commit and cancellation passed\n";
 }
 int wmain(int argc, wchar_t **argv) {
+    if (argc == 3 && std::wstring(argv[1]) == L"--contract") {
+        try {
+            candidate_contract(argv[2]);
+            std::cout << "Windows candidate-list and input-mode contracts passed\n";
+            return 0;
+        } catch (const std::exception &error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     auto record = [&](bool success, const char *message) {
-        if (argc == 4 && std::wstring(argv[1]) == L"--installed") {
-            std::ofstream output{std::filesystem::path(argv[3]), std::ios::trunc};
+        bool installedResult = argc == 4 && (std::wstring(argv[1]) == L"--installed" ||
+                                             std::wstring(argv[1]) == L"--installed-ui-less");
+        bool hostResult = argc == 3 && std::wstring(argv[1]) != L"--contract" &&
+                          std::wstring(argv[1]) != L"--installed" &&
+                          std::wstring(argv[1]) != L"--installed-ui-less";
+        if (installedResult || hostResult) {
+            auto path = installedResult ? argv[3] : argv[2];
+            std::ofstream output{std::filesystem::path(path), std::ios::trunc};
             output << nlohmann::json{{"success", success},
                                      {"message", message},
                                      {"bits", sizeof(void *) * 8}}
@@ -457,6 +682,7 @@ int wmain(int argc, wchar_t **argv) {
     auto root = std::filesystem::temp_directory_path() /
                 ("r-ime-tsf-test-" + std::to_string(GetCurrentProcessId()));
     SetEnvironmentVariableW(L"RIME_USER_ROOT", root.c_str());
+    SetEnvironmentVariableW(L"RIME_TSF_TRACE", L"1");
     HANDLE ownedWorker = nullptr;
     auto shutdown = [&] {
         try {
@@ -482,11 +708,20 @@ int wmain(int argc, wchar_t **argv) {
         }
     } workerGuard{shutdown};
     try {
-        bool installed = argc >= 2 && std::wstring(argv[1]) == L"--installed";
-        check(installed ? argc == 3 || argc == 4 : argc == 2,
-              "usage: windows-tsf-test r-ime-tsf.dll | --installed <installation-directory> "
+        bool uiLess = argc >= 2 && std::wstring(argv[1]) == L"--installed-ui-less";
+        bool installed = argc >= 2 && (std::wstring(argv[1]) == L"--installed" || uiLess);
+        check(installed ? argc == 3 || argc == 4 : argc == 2 || argc == 3,
+              "usage: windows-tsf-test r-ime-tsf.dll [result.json] | --installed "
+              "<installation-directory> "
               "[result.json]");
-        check(installed ? start_installed_worker(argv[2], ownedWorker) : rime_ime::start_engine(),
+        auto workerDirectory = installed ? std::filesystem::path(argv[2])
+                                          : std::filesystem::absolute(argv[0]).parent_path();
+        if (!installed && !std::filesystem::exists(workerDirectory / L"r-ime-engine.exe") &&
+            std::filesystem::exists(workerDirectory.parent_path() / L"r-ime-engine.exe"))
+            workerDirectory = workerDirectory.parent_path();
+        // Retain the handle for every private test worker, including local DLL
+        // tests, so failed startup/IPC cannot leave a process locking the build.
+        check(start_installed_worker(workerDirectory, ownedWorker),
               "start native engine from requested installation");
         {
             rime_ime::Client worker(rime_ime::Paths::from_environment().runtime / "engine.sock");
@@ -503,9 +738,12 @@ int wmain(int argc, wchar_t **argv) {
             check(ready, "native worker readiness");
         }
         if (installed) {
-            installed_test();
-            record(true, "Installed system profile, visible on-screen candidates, real Windows "
-                         "key dispatch, Chinese commit and cancellation passed");
+            installed_test(uiLess);
+            record(true,
+                   uiLess ? "Installed UI-less host, public candidate list, host-controlled "
+                            "visibility TRUE/FALSE, Chinese commit and cancellation passed"
+                          : "Installed system profile, visible on-screen candidates, real Windows "
+                            "key dispatch, Chinese commit and cancellation passed");
             return 0;
         }
         hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), "COM initialize");
@@ -540,15 +778,23 @@ int wmain(int argc, wchar_t **argv) {
            "create real TSF manager");
         TfClientId client;
         hr(manager->Activate(&client), "activate manager");
+        ComPtr<ITfMessagePump> messagePump;
+        hr(manager.As(&messagePump), "unit host TSF message pump");
+        tsfMessagePump = messagePump.Get();
         for (int resource : {101, 102}) {
             auto icon = static_cast<HICON>(
                 LoadImageW(dll, MAKEINTRESOURCEW(resource), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
             check(icon, "embedded R-IME icons decode successfully");
             DestroyIcon(icon);
         }
-        HWND window =
-            CreateWindowExW(0, L"EDIT", L"R-IME TSF integration", WS_OVERLAPPEDWINDOW, 100, 100,
-                            600, 250, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        WNDCLASSW unitClass{};
+        unitClass.hInstance = GetModuleHandleW(nullptr);
+        unitClass.lpfnWndProc = DefWindowProcW;
+        unitClass.lpszClassName = L"R-IME.TSF.UnitDocument";
+        RegisterClassW(&unitClass);
+        HWND window = CreateWindowExW(0, unitClass.lpszClassName, L"R-IME TSF integration",
+                                      WS_OVERLAPPEDWINDOW, 100, 100, 600, 250, nullptr, nullptr,
+                                      GetModuleHandleW(nullptr), nullptr);
         check(window, "create document window");
         ComPtr<Store> store;
         store.Attach(new Store(window));
@@ -560,25 +806,170 @@ int wmain(int argc, wchar_t **argv) {
            "create ACP context");
         hr(document->Push(context.Get()), "push context");
         hr(manager->SetFocus(document.Get()), "focus TSF document");
+        ComPtr<ITfDocumentMgr> previousDocument;
+        hr(manager->AssociateFocus(window, document.Get(), &previousDocument),
+           "associate test document with real window focus");
+        ShowWindow(window, SW_SHOWNORMAL);
+        SetForegroundWindow(window);
+        SetFocus(window);
+        pump();
         hr(profiles->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR, 0x0804, service_id, profile_id,
                                      nullptr,
                                      TF_IPPMF_FORPROCESS | TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE |
                                          TF_IPPMF_ENABLEPROFILE),
            "activate test profile");
         pump();
+        bool foregroundReady = false;
+        ComPtr<ITfKeystrokeMgr> dispatcher;
+        hr(manager.As(&dispatcher), "unit Windows keystroke dispatcher");
+        for (int attempt = 0; attempt < 250; ++attempt) {
+            pump();
+            CLSID foreground{};
+            dispatcher->GetForeground(&foreground);
+            BOOL threadFocus = FALSE;
+            manager->IsThreadFocus(&threadFocus);
+            if (tracking->active && threadFocus && GetForegroundWindow() == window &&
+                foreground == service_id) {
+                foregroundReady = true;
+                break;
+            }
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+        }
         auto service = tracking->active;
         check(service != nullptr, "TSF activated the test text service");
+        check(foregroundReady,
+              "Native TSF host requires a foreground desktop window; run interactively or under "
+              "the Windows debugger. Background CTest cannot claim desktop foreground focus.");
+        dispatcher.Reset();
+        ComPtr<ITfFunctionProvider> functions;
+        hr(manager->GetFunctionProvider(service_id, &functions),
+           "thread manager publishes the Windows settings provider");
+        ComPtr<IUnknown> configure;
+        hr(functions->GetFunction(GUID_NULL, IID_ITfFnConfigure, &configure),
+           "thread manager's provider exposes properties");
+        configure.Reset();
+        functions.Reset();
+        ComPtr<ITfSource> threadSource;
+        hr(manager.As(&threadSource), "thread event source");
+        ComPtr<CandidateHost> candidateHost;
+        candidateHost.Attach(new CandidateHost);
+        DWORD candidateSinkCookie;
+        hr(threadSource->AdviseSink(IID_ITfUIElementSink, candidateHost.Get(),
+                                    &candidateSinkCookie),
+           "subscribe host-side candidate UI control");
+        ComPtr<ITfUIElementMgr> uiManager;
+        hr(manager.As(&uiManager), "Windows candidate UI manager");
         ComPtr<ITfKeyEventSink> keys;
         hr(service.As(&keys), "key sink");
         auto key = [&](WPARAM code) {
             BOOL eaten = FALSE;
             hr(keys->OnKeyDown(context.Get(), code, 1, &eaten), "OnKeyDown");
             pump();
+            if (!eaten && code >= 'A' && code <= 'Z' && store->text.empty()) {
+                BOOL threadFocus = FALSE;
+                manager->IsThreadFocus(&threadFocus);
+                ComPtr<ITfLangBarItemButton> bar;
+                service.As(&bar);
+                BSTR mode = nullptr;
+                DWORD barStatus = 0;
+                if (bar) {
+                    bar->GetText(&mode);
+                    bar->GetStatus(&barStatus);
+                }
+                std::cerr << "Unconsumed initial letter: threadFocus=" << threadFocus
+                          << " windowForeground=" << (GetForegroundWindow() == window)
+                          << " barStatus=" << barStatus
+                          << " ASCII=" << (mode && wcscmp(mode, L"A") == 0)
+                          << " Shift=" << GetKeyState(VK_SHIFT)
+                          << " Control=" << GetKeyState(VK_CONTROL)
+                          << " Alt=" << GetKeyState(VK_MENU)
+                          << " CapsLock=" << GetKeyState(VK_CAPITAL) << '\n';
+                SysFreeString(mode);
+                ComPtr<ITfCompartmentMgr> modes;
+                manager.As(&modes);
+                for (auto id : {GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+                                GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION}) {
+                    ComPtr<ITfCompartment> compartment;
+                    modes->GetCompartment(id, &compartment);
+                    VARIANT value;
+                    VariantInit(&value);
+                    auto result = compartment->GetValue(&value);
+                    std::cerr << "Thread mode compartment "
+                              << (id == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE ? "open" : "conversion")
+                              << " HRESULT=" << std::hex << result << std::dec
+                              << " type=" << value.vt
+                              << " value=" << (value.vt == VT_I4 ? value.lVal : -1) << '\n';
+                    VariantClear(&value);
+                }
+                TF_STATUS documentStatus{};
+                context->GetStatus(&documentStatus);
+                std::cerr << "Document dynamic status=" << documentStatus.dwDynamicFlags << '\n';
+            }
             return eaten;
         };
         for (auto c : std::wstring(L"nihao"))
             check(key(c - L'a' + L'A'), "pinyin key consumed");
         check(!store->text.empty(), "inline preedit written via TSF edit session");
+        {
+            class ReadStyle final : public ITfEditSession {
+                ULONG refs_ = 1;
+                ComPtr<ITfContext> context_;
+                bool &found_;
+
+              public:
+                ReadStyle(ITfContext *context, bool &found) : context_(context), found_(found) {}
+                HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **p) override {
+                    if (!p)
+                        return E_POINTER;
+                    *p = nullptr;
+                    if (id == IID_IUnknown || id == IID_ITfEditSession)
+                        *p = this;
+                    if (!*p)
+                        return E_NOINTERFACE;
+                    AddRef();
+                    return S_OK;
+                }
+                ULONG STDMETHODCALLTYPE AddRef() override {
+                    return ++refs_;
+                }
+                ULONG STDMETHODCALLTYPE Release() override {
+                    auto count = --refs_;
+                    if (!count)
+                        delete this;
+                    return count;
+                }
+                HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie cookie) override {
+                    TF_SELECTION selection{};
+                    ULONG count = 0;
+                    auto status =
+                        context_->GetSelection(cookie, TF_DEFAULT_SELECTION, 1, &selection, &count);
+                    if (FAILED(status) || !count)
+                        return E_FAIL;
+                    ComPtr<ITfRange> range;
+                    range.Attach(selection.range);
+                    LONG moved = 0;
+                    range->ShiftStart(cookie, -1, &moved, nullptr);
+                    ComPtr<ITfProperty> property;
+                    status = context_->GetProperty(GUID_PROP_ATTRIBUTE, &property);
+                    if (FAILED(status))
+                        return status;
+                    VARIANT value;
+                    VariantInit(&value);
+                    status = property->GetValue(cookie, range.Get(), &value);
+                    found_ = SUCCEEDED(status) && value.vt == VT_I4 && value.lVal != 0;
+                    VariantClear(&value);
+                    return status;
+                }
+            };
+            bool found = false;
+            ComPtr<ITfEditSession> reader;
+            reader.Attach(new ReadStyle(context.Get(), found));
+            HRESULT result;
+            hr(context->RequestEditSession(client, reader.Get(), TF_ES_SYNC | TF_ES_READ, &result),
+               "read native preedit formatting through TSF");
+            hr(result, "native preedit formatting edit session");
+            check(found, "preedit range carries the native display-attribute atom");
+        }
         check(key(VK_SPACE), "space consumed");
         check(store->text == L"你好", "space commits exactly one Chinese candidate");
         for (auto c : std::wstring(L"nihao"))
@@ -599,6 +990,72 @@ int wmain(int argc, wchar_t **argv) {
         SendMessageW(candidate, WM_LBUTTONUP, 0, MAKELPARAM(click, click));
         pump();
         check(store->text == L"你好你好", "repeated stale click never commits twice");
+        auto beforeHostCommit = store->text;
+        candidateHost->allowWindow = false;
+        for (auto code : std::wstring(L"NIHAO"))
+            check(key(code), "pinyin in host-rendered candidate mode");
+        check(candidateHost->begins > 0 && candidateHost->updates > 0,
+              "Windows host receives candidate lifecycle and updates");
+        check(!IsWindowVisible(candidate), "host denial hides the input method's own window");
+        ComPtr<ITfUIElement> ui;
+        hr(uiManager->GetUIElement(candidateHost->element, &ui),
+           "host retrieves current candidate UI");
+        ComPtr<ITfCandidateListUIElementBehavior> hostCandidates;
+        hr(ui.As(&hostCandidates), "host retrieves selectable candidate list");
+        UINT candidateCount = 0, selected = 0;
+        hr(hostCandidates->GetCount(&candidateCount), "host candidate count");
+        check(candidateCount >= 2, "host sees real Rime candidate strings");
+        hr(hostCandidates->SetSelection(1), "host selects second candidate without committing");
+        pump();
+        hr(hostCandidates->GetSelection(&selected), "host selected index");
+        check(selected == 1, "host selection agrees with engine selection");
+        BSTR chosen = nullptr;
+        hr(hostCandidates->GetString(1, &chosen), "host selected candidate string");
+        std::wstring chosenText(chosen, SysStringLen(chosen));
+        SysFreeString(chosen);
+        hr(hostCandidates->Finalize(), "host finalizes selected candidate");
+        pump();
+        check(store->text == beforeHostCommit + chosenText,
+              "host finalization commits exactly selected text");
+        check(candidateHost->ends > 0, "committing ends the TSF candidate UI lifecycle");
+        check(!IsWindowVisible(candidate), "host finalization leaves no floating candidate window");
+        hostCandidates.Reset();
+        ui.Reset();
+        candidateHost->allowWindow = true;
+        for (auto code : std::wstring(L"NIHAO"))
+            check(key(code),
+                  "composition before an asynchronously deferred candidate finalization");
+        hr(uiManager->GetUIElement(candidateHost->element, &ui),
+           "candidate UI before deferred selection");
+        hr(ui.As(&hostCandidates), "candidate behavior before deferred selection");
+        store->deferLocks = true;
+        hr(hostCandidates->Finalize(),
+           "queue candidate finalization while application owns its lock");
+        check(store->hasDeferredLock(), "application really deferred the selection edit lock");
+        store->deferLocks = false;
+        check(key('N'), "a synchronous newer key updates candidates before the deferred selection");
+        auto newestPreedit = store->text;
+        store->grantDeferredLock();
+        pump();
+        check(store->text == newestPreedit,
+              "a queued stale selection cannot commit newer candidates");
+        check(key(VK_ESCAPE), "cancel composition after stale selection was discarded");
+        hostCandidates.Reset();
+        ui.Reset();
+        check(key('N'), "composition for layout tracking");
+        RECT originalCandidate{};
+        GetWindowRect(candidate, &originalCandidate);
+        store->layoutOrigin.y += 90;
+        ComPtr<ITfTextLayoutSink> layoutSink;
+        hr(service.As(&layoutSink), "TIP subscribes to document layout changes");
+        hr(layoutSink->OnLayoutChange(context.Get(), TF_LC_CHANGE, nullptr),
+           "document scroll layout change");
+        pump();
+        RECT movedCandidate{};
+        GetWindowRect(candidate, &movedCandidate);
+        check(movedCandidate.top != originalCandidate.top,
+              "candidate follows caret after a layout change");
+        check(key(VK_ESCAPE), "cancel layout tracking composition");
         auto baseline = store->text;
         check(key('N'), "new composition");
         check(key(VK_ESCAPE), "escape consumed");
@@ -609,7 +1066,13 @@ int wmain(int argc, wchar_t **argv) {
         hr(focus->OnKillThreadFocus(), "lose focus");
         pump();
         check(store->text == baseline, "focus loss removes preedit");
-        hr(focus->OnSetThreadFocus(), "regain focus");
+        hr(keys->OnSetFocus(TRUE), "Windows key sink regains keyboard focus");
+        check(key('N'), "keyboard focus notification restores input after thread focus loss");
+        hr(keys->OnSetFocus(FALSE), "Windows key sink loses keyboard focus");
+        pump();
+        check(store->text == baseline, "keyboard focus loss clears uncommitted composition");
+        check(!key('N'), "inactive key sink passes letters through");
+        hr(focus->OnSetThreadFocus(), "regain thread focus");
         ComPtr<ITfCompartmentMgr> compartments;
         hr(context.As(&compartments), "context compartments");
         ComPtr<ITfCompartment> disabled;
@@ -624,6 +1087,17 @@ int wmain(int argc, wchar_t **argv) {
         check(store->text == baseline, "protected input is never sent to document");
         value.lVal = 0;
         hr(disabled->SetValue(client, &value), "enable context");
+        ComPtr<ITfCompartmentMgr> threadCompartments;
+        hr(manager.As(&threadCompartments), "Windows thread mode compartments");
+        ComPtr<ITfCompartment> openClose;
+        hr(threadCompartments->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, &openClose),
+           "Windows IME open/close mode");
+        hr(openClose->SetValue(client, &value), "Windows closes IME");
+        pump();
+        check(!key('N'), "Windows closed IME mode passes letters through");
+        value.lVal = 1;
+        hr(openClose->SetValue(client, &value), "Windows opens IME");
+        pump();
         check(key('N'), "worker remains usable after sensitive context");
         check(key(VK_RETURN), "raw Enter consumed");
         check(store->text == baseline + L"n", "Enter commits raw input");
@@ -645,6 +1119,24 @@ int wmain(int argc, wchar_t **argv) {
         BYTE original[256]{}, control[256]{};
         GetKeyboardState(original);
         std::copy_n(original, 256, control);
+        shiftTap();
+        BYTE shiftState[256]{};
+        std::copy_n(original, 256, shiftState);
+        shiftState[VK_SHIFT] = 0x80;
+        SetKeyboardState(shiftState);
+        BOOL shapeToggle = key(VK_SPACE);
+        SetKeyboardState(original);
+        check(shapeToggle, "Shift+Space enables full-width input in English mode");
+        auto beforeFullWidth = store->text;
+        check(key('A') && key('1') && key(VK_SPACE),
+              "full-width letters, digits and spaces consumed");
+        check(store->text == beforeFullWidth + L"ａ１　",
+              "full-width input produces Windows-style forms");
+        SetKeyboardState(shiftState);
+        shapeToggle = key(VK_SPACE);
+        SetKeyboardState(original);
+        check(shapeToggle && !key('N'), "Shift+Space restores half-width English pass-through");
+        shiftTap();
         control[VK_CONTROL] = 0x80;
         SetKeyboardState(control);
         BOOL consumed = FALSE;
@@ -674,6 +1166,10 @@ int wmain(int argc, wchar_t **argv) {
         store->readonly = true;
         check(!key('N'), "read-only context passes through");
         store->readonly = false;
+        store->failTextWrites = true;
+        check(!key('N'), "application rejecting preedit must not lose the key");
+        store->failTextWrites = false;
+        check(store->text == baseline, "failed preedit writes do not alter committed text");
         store->deferLocks = true;
         check(!key('N'), "an unavailable synchronous edit lock must pass the key through");
         store->deferLocks = false;
@@ -681,6 +1177,13 @@ int wmain(int argc, wchar_t **argv) {
         hr(profiles->DeactivateProfile(TF_PROFILETYPE_INPUTPROCESSOR, 0x0804, service_id,
                                        profile_id, nullptr, TF_IPPMF_FORPROCESS),
            "deactivate test profile");
+        threadSource->UnadviseSink(candidateSinkCookie);
+        uiManager.Reset();
+        candidateHost.Reset();
+        threadSource.Reset();
+        layoutSink.Reset();
+        openClose.Reset();
+        threadCompartments.Reset();
         keys.Reset();
         focus.Reset();
         service.Reset();
@@ -689,6 +1192,8 @@ int wmain(int argc, wchar_t **argv) {
         document.Reset();
         manager->Deactivate();
         manager.Reset();
+        tsfMessagePump = nullptr;
+        messagePump.Reset();
         store.Reset();
         factory.Reset();
         CoRevokeClassObject(classCookie);
@@ -699,6 +1204,9 @@ int wmain(int argc, wchar_t **argv) {
         DestroyWindow(window);
         CoUninitialize();
         FreeLibrary(dll);
+        record(true, "Desktop TSF host: activation, candidate UI lifecycle/host selection, "
+                     "stale selection protection, layout, focus, modes, protected input and "
+                     "live shortcuts passed");
         std::cout << "TSF activation, preedit, commit, candidate click, no-focus-steal, cancel, "
                      "focus, protected input, Shift and live shortcuts passed\n";
         return 0;

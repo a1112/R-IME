@@ -29,6 +29,7 @@ int main() {
         auto cfg = default_config();
         validate_config(cfg);
         require(cfg["appearance"]["page_size"] == 5, "default candidate count");
+        require(cfg["general"].value("full_shape", true) == false, "default half-width input");
         auto bad = cfg;
         bad["appearance"]["page_size"] = 10;
         rejects([&] { validate_config(bad); });
@@ -38,8 +39,21 @@ int main() {
         bad = cfg;
         bad["general"]["learning"] = "true";
         rejects([&] { validate_config(bad); });
+        bad = cfg;
+        bad["general"]["full_shape"] = "true";
+        rejects([&] { validate_config(bad); });
+        auto legacy = cfg;
+        legacy["general"].erase("full_shape");
+        validate_config(legacy);
+        atomic_write(paths.config, legacy.dump());
+        require(load_config(paths.config) == cfg, "legacy configuration migrates to half-width");
         save_config(paths.config, cfg);
         require(load_config(paths.config) == cfg, "config roundtrip");
+        auto full_shape = cfg;
+        full_shape["general"]["full_shape"] = true;
+        save_config(paths.config, full_shape);
+        require(load_config(paths.config) == full_shape, "full-width preference roundtrip");
+        save_config(paths.config, cfg);
         rejects([&] { save_config(paths.config, bad); });
         require(load_config(paths.config) == cfg, "invalid save damaged last config");
         auto phrases = parse_phrases("# comment\nrime\t定制输入法\t100\nnihao\t你好\t9\n");
@@ -57,6 +71,14 @@ int main() {
         restore(paths, archive);
         require(read_file(paths.data / "rime" / "binary.userdb") == std::string("a\0b", 3),
                 "binary restore");
+        auto full_shape_archive = archive;
+        full_shape_archive["config"]["general"]["full_shape"] = true;
+        restore(paths, full_shape_archive);
+        require(load_config(paths.config) == full_shape, "restore preserves full-width preference");
+        auto legacy_archive = archive;
+        legacy_archive["config"]["general"].erase("full_shape");
+        restore(paths, legacy_archive);
+        require(load_config(paths.config) == cfg, "legacy backup migrates to half-width");
         auto evil = archive;
         evil["files"][0]["path"] = "../escape";
         rejects([&] { restore(paths, evil); });

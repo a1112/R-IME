@@ -248,6 +248,7 @@ struct Worker {
     std::unique_ptr<Engine> engine;
     std::function<void()> pump_typing;
     bool deploying = false;
+    std::uint64_t session_generation = 0;
     std::string startup_error;
     explicit Worker(Options value) : options(std::move(value)), config(default_config()) {
         recover_directory(options.paths.data, ".r-ime-before-import-");
@@ -290,7 +291,14 @@ struct Worker {
         require(probe.value("ok", false), "deployed scheme cannot create a session");
         result->dispatch(
             {{"version", 1}, {"id", 2}, {"session", probe["session"]}, {"op", "destroy"}});
+        ++session_generation;
         return result;
+    }
+    std::string deployed_phrases() const {
+        const auto file = options.user / "r-ime-phrases.tsv";
+        auto text = fs::exists(file) ? read_file(file, 8 * 1024 * 1024) : std::string{};
+        (void)parse_phrases(text);
+        return text;
     }
     void recover_engine() noexcept {
         if (engine || !startup_error.empty())
@@ -301,8 +309,8 @@ struct Worker {
             std::cerr << "R-IME recovery unavailable: " << error.what() << '\n';
         }
     }
-    bool configure(const Json &next, const std::string *phrases = nullptr) {
-        validate_config(next);
+    bool configure(Json next, const std::string *phrases = nullptr) {
+        next = normalize_config(std::move(next));
         if (phrases)
             (void)parse_phrases(*phrases);
         std::string previous_phrases = fs::exists(options.paths.data / "phrases.tsv")
@@ -463,8 +471,12 @@ struct Worker {
     }
     Json dispatch(const Json &request) {
         auto reply = reply_base(request);
+        const auto before = session_generation;
+        const bool had_engine = bool(engine);
         try {
-            require(request.at("version") == 1, "unsupported protocol version");
+            require(request.contains("version") && request.at("version").is_number_integer() &&
+                        request.at("version") == 1,
+                    "unsupported protocol version");
             auto op = request.at("op").get<std::string>();
             const bool mutation =
                 op == "configure" || op == "reload" || op == "backup" || op == "restore";
@@ -481,6 +493,30 @@ struct Worker {
                         busy = false;
                 }
             } guard(deploying, mutation);
+            if (op == "configuration") {
+                require(request.value("session", std::uint64_t{}) == 0,
+                        "configuration snapshots require session zero");
+                reply["config"] = config;
+                reply["phrases"] = deployed_phrases();
+                reply["recovery_required"] = !startup_error.empty();
+                reply["diagnostic"] = startup_error;
+                return reply;
+            }
+            if (op == "configure") {
+                std::string conflict;
+                if (request.contains("expected_config") && request.at("expected_config") != config)
+                    conflict = "stale configuration snapshot";
+                else if (request.contains("expected_phrases") &&
+                         request.at("expected_phrases").get<std::string>() != deployed_phrases())
+                    conflict = "stale phrase snapshot";
+                if (!conflict.empty()) {
+                    reply["ok"] = false;
+                    reply["error"] = conflict;
+                    reply["error_code"] = "conflict";
+                    reply["sessions_invalidated"] = false;
+                    return reply;
+                }
+            }
             if (!startup_error.empty()) {
                 if (op == "status" && request.value("session", 0) == 0) {
                     reply["config"] = config;
@@ -540,7 +576,7 @@ struct Worker {
             recover_engine();
             reply["ok"] = false;
             reply["error"] = error.what();
-            reply["sessions_invalidated"] = true;
+            reply["sessions_invalidated"] = session_generation != before || (had_engine && !engine);
             return reply;
         }
     }
@@ -680,6 +716,7 @@ int main(int argc, char **argv) {
                                 response = reply_base(Json::object());
                             response["ok"] = false;
                             response["error"] = error.what();
+                            response["sessions_invalidated"] = false;
                         }
                         client.output += response.dump() + "\n";
                         if (client.output.size() > 140 * 1024 * 1024)

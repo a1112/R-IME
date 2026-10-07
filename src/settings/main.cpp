@@ -1,8 +1,10 @@
 #include "backend.hpp"
 #include <QCommandLineParser>
+#include <QFont>
+#include <QFontDatabase>
 #include <QGuiApplication>
-#include <QImage>
 #include <QIcon>
+#include <QImage>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlError>
@@ -16,7 +18,20 @@ int main(int argc, char **argv) {
     QCoreApplication::setOrganizationName("R-IME");
     QGuiApplication::setApplicationDisplayName(QString::fromUtf8("R-IME 设置"));
     QGuiApplication::setWindowIcon(QIcon(QStringLiteral(":/branding/r-ime.svg")));
+#ifdef _WIN32
+    QQuickStyle::setStyle("FluentWinUI3");
+    // Fluent controls select Segoe themselves. Their Han glyphs must use the
+    // Windows UI font rather than a legacy serif font chosen by font linking.
+    QFontDatabase::addApplicationFallbackFontFamily(QChar::Script_Han,
+                                                    QStringLiteral("Microsoft YaHei UI"));
+    QFont interfaceFont;
+    interfaceFont.setFamilies({QStringLiteral("Segoe UI Variable"), QStringLiteral("Segoe UI"),
+                               QStringLiteral("Microsoft YaHei UI")});
+    interfaceFont.setPixelSize(14);
+    QGuiApplication::setFont(interfaceFont);
+#else
     QQuickStyle::setStyle("Basic");
+#endif
     QCommandLineParser parser;
     parser.addHelpOption();
     parser.addOption(
@@ -37,7 +52,11 @@ int main(int argc, char **argv) {
     engine.rootContext()->setContextProperty("settings", &backend);
     engine.rootContext()->setContextProperty("initialPage", parser.value("page"));
     engine.rootContext()->setContextProperty("previewTheme", parser.value("theme"));
+#ifdef _WIN32
+    engine.load(QUrl("qrc:/settings/Windows.qml"));
+#else
     engine.load(QUrl("qrc:/settings/Main.qml"));
+#endif
     if (engine.rootObjects().isEmpty())
         return 1;
     if (qa)

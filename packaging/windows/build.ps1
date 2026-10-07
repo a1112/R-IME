@@ -25,7 +25,7 @@ if(!$SkipBuild){
 }
 $payload=Join-Path $BuildDirectory 'package'
 New-Item -ItemType Directory -Force $payload,(Join-Path $payload 'x86'),(Join-Path $payload 'share/rime-data'),(Join-Path $payload 'share/r-ime/rime') | Out-Null
-foreach($file in @('r-ime-engine.exe','rime.dll','r-ime-settings.exe','r-ime-tsf.dll','r-ime-register.exe')){Copy-Item -LiteralPath (Join-Path $BuildDirectory "bin/$file") -Destination $payload -Force}
+foreach($file in @('r-ime-engine.exe','rime.dll','r-ime-settings.exe','r-ime-tsf.dll','r-ime-register.exe','r-ime-ctl.exe')){Copy-Item -LiteralPath (Join-Path $BuildDirectory "bin/$file") -Destination $payload -Force}
 foreach($file in @('r-ime-tsf.dll','r-ime-register.exe')){Copy-Item -LiteralPath (Join-Path $X86BuildDirectory "bin/$file") -Destination (Join-Path $payload 'x86') -Force}
 Copy-Item (Join-Path $repo 'data/rime/*') (Join-Path $payload 'share/r-ime/rime') -Force
 Invoke-Checked 'tar' @('-xf',(Join-Path $PSScriptRoot 'rime-data.tar.gz'),'-C',(Join-Path $payload 'share/rime-data'))
@@ -45,5 +45,8 @@ New-Item -ItemType Directory -Force (Join-Path $payload 'licenses/qt') | Out-Nul
 Get-ChildItem (Join-Path $QtRoot '../../Licenses') -File -ErrorAction SilentlyContinue | Copy-Item -Destination (Join-Path $payload 'licenses/qt') -Force
 Copy-Item (Join-Path $PSScriptRoot 'THIRD-PARTY.md') $payload -Force
 Copy-Item -LiteralPath (Join-Path $repo 'docs/windows.md') -Destination (Join-Path $payload 'README.md') -Force
+Copy-Item -LiteralPath (Join-Path $repo 'docs/control-api.md') -Destination (Join-Path $payload 'control-api.md') -Force
+New-Item -ItemType Directory -Force (Join-Path $payload 'examples') | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'examples/control_client.py') -Destination (Join-Path $payload 'examples') -Force
 Copy-Item (Join-Path $PSScriptRoot 'install.ps1'),(Join-Path $PSScriptRoot 'uninstall.ps1') $payload -Force
 Write-Output "Windows package: $payload"

@@ -19,6 +19,8 @@ Json default_config();
 // All invalid input and I/O failures throw std::runtime_error (JSON errors may
 // derive from std::exception). Callers must display the exception, not overwrite.
 void validate_config(const Json &config);
+// Validate and fill optional version-1 fields without changing existing values.
+Json normalize_config(Json config);
 Json load_config(const fs::path &file);
 void save_config(const fs::path &file, const Json &config);
 void atomic_write(const fs::path &file, const std::string &data);

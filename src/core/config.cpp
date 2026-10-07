@@ -104,6 +104,7 @@ Json default_config() {
             {"general",
              {{"ascii", false},
               {"simplified", true},
+              {"full_shape", false},
               {"ascii_punctuation", false},
               {"learning", true}}},
             {"input", {{"schema", "rime_ime_pinyin"}}},
@@ -125,6 +126,10 @@ void validate_config(const Json &cfg) {
     const auto &g = cfg.at("general");
     for (auto key : {"ascii", "simplified", "ascii_punctuation", "learning"})
         check(g.at(key).is_boolean(), std::string("expected boolean: ") + key);
+    // Version 1 configurations and backups written before full-width support
+    // remain valid; absent means the original half-width behavior.
+    if (g.contains("full_shape"))
+        check(g.at("full_shape").is_boolean(), "expected boolean: full_shape");
     const auto &a = cfg.at("appearance");
     check(a.at("page_size").is_number_integer(), "page size must be an integer");
     int page = a.at("page_size");
@@ -153,6 +158,14 @@ void validate_config(const Json &cfg) {
         check(value != "Alt+Tab" && value != "Control+Space" && value != "Super+Space",
               "shortcut conflicts with common desktop binding: " + value);
     }
+}
+Json normalize_config(Json config) {
+    validate_config(config);
+    if (!config["general"].contains("full_shape")) {
+        config["general"]["full_shape"] = false;
+        validate_config(config);
+    }
+    return config;
 }
 std::string read_file(const fs::path &file, std::size_t limit) {
     check(fs::is_regular_file(file), "not a regular file: " + file.string());
@@ -235,13 +248,10 @@ void atomic_write(const fs::path &file, const std::string &data) {
 Json load_config(const fs::path &file) {
     if (!fs::exists(file))
         return default_config();
-    auto result = Json::parse(read_file(file, 1024 * 1024));
-    validate_config(result);
-    return result;
+    return normalize_config(Json::parse(read_file(file, 1024 * 1024)));
 }
 void save_config(const fs::path &file, const Json &config) {
-    validate_config(config);
-    atomic_write(file, config.dump(2) + "\n");
+    atomic_write(file, normalize_config(config).dump(2) + "\n");
 }
 std::vector<Phrase> parse_phrases(const std::string &tsv) {
     check(tsv.size() <= 8 * 1024 * 1024, "phrase file exceeds 8 MiB");
