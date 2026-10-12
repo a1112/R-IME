@@ -1,0 +1,20 @@
+name: Version consistency
+on:
+  push:
+    branches: ["codex/linux-ime", "chore/version-management-20261012"]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: version-consistency-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -B scripts/version_manager.py check
+      - run: python3 -B -m unittest discover -s tests/versioning -p 'test_*.py'

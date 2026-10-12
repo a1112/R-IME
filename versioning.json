@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "notes": [
+    "Adoption preserves all existing canonical versions; no release, bump, commit or tag is performed by this tool.",
+    "Central artifact versions are historical observations, not authoritative replacements for source manifest versions.",
+    "Versions on explicitly separate units are independent even when currently numerically equal."
+  ],
+  "units": {
+    "app": {
+      "canonical": {
+        "path": "CMakeLists.txt",
+        "adapter": "line",
+        "syntax": "cmake-project",
+        "prefix": "project(RIME VERSION ",
+        "suffix": " LANGUAGES C CXX)",
+        "expected_occurrences": 1,
+        "format": "semver"
+      },
+      "mirrors": [],
+      "notes": "Existing CMake project version is canonical; dependency and toolchain versions remain separate."
+    }
+  },
+  "unmanaged": []
+}
