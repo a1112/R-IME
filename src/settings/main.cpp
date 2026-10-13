@@ -1,4 +1,5 @@
 #include "backend.hpp"
+#include "window_placement.hpp"
 #include <QCommandLineParser>
 #include <QFont>
 #include <QFontDatabase>
@@ -59,6 +60,8 @@ int main(int argc, char **argv) {
 #endif
     if (engine.rootObjects().isEmpty())
         return 1;
+    if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()))
+        installWindowPlacement(window, qa);
     if (qa)
         QTimer::singleShot(900, &app, [&] {
             if (parser.isSet("screenshot")) {
