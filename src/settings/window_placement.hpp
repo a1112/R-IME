@@ -25,7 +25,8 @@ inline void installWindowPlacement(QWindow *window, bool preview) {
         const int availableHeight = qMax(1, work.height() - edge * 2 - margins.top() - margins.bottom());
         const int maxWidth = fresh ? qMin(availableWidth, int(work.width() * .8)) : availableWidth;
         const int maxHeight = fresh ? qMin(availableHeight, int(work.height() * .8)) : availableHeight;
-        window->setMinimumSize(QSize(qMin(760, maxWidth), qMin(520, maxHeight)));
+        window->setMinimumSize(QSize(qMin(qMin(760, maxWidth), fresh ? 760 : requested.width()),
+                                    qMin(qMin(520, maxHeight), fresh ? 520 : requested.height())));
         requested.setSize(QSize(qBound(window->minimumWidth(), requested.width(), maxWidth),
                                 qBound(window->minimumHeight(), requested.height(), maxHeight)));
         const int left = work.left() + edge + margins.left();

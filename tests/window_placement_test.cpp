@@ -24,6 +24,12 @@ int main(int argc, char **argv) {
     QWindow restored;
     installWindowPlacement(&restored, false);
     assert(restored.geometry() == saved);
+    // A size saved on a small screen stays small after moving to a larger screen.
+    const QRect small(work.x() + 20, work.y() + 20, 500, 350);
+    QSettings().setValue("window/normalGeometry", small);
+    QWindow smallRestored;
+    installWindowPlacement(&smallRestored, false);
+    assert(smallRestored.geometry() == small);
     // A missing monitor is corrected back into the current work area.
     QSettings().setValue("window/normalGeometry", QRect(-10000, -10000, 700, 500));
     QWindow unplugged;
