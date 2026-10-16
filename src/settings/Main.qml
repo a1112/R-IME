@@ -7,7 +7,7 @@ ApplicationWindow {
     id: window
     width: 860; height: 620
     minimumWidth: 760; minimumHeight: 560
-    visible: true
+    visible: false
     title: "R-IME 设置"
     property var pages: ["general", "schemes", "phrases", "shortcuts", "appearance", "backup"]
     property var titles: ["常规", "输入方案", "词库与短语", "快捷键", "外观", "备份与恢复"]
