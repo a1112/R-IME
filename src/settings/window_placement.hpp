@@ -8,6 +8,9 @@
 
 // QScreen work areas and QWindow geometry are already in logical pixels.
 inline void installWindowPlacement(QWindow *window, bool preview) {
+    // Create the hidden native window before querying decoration margins. On high
+    // DPI backends a first show can otherwise shift a work-area-sized restore out.
+    window->create();
     auto settings = std::make_shared<QSettings>();
     auto fit = [window](QRect requested, bool fresh) {
         QScreen *screen = QGuiApplication::primaryScreen();

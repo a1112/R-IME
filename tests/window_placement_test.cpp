@@ -27,7 +27,9 @@ int main(int argc, char **argv) {
     installWindowPlacement(&restored, false);
     CHECK(restored.geometry() == saved);
     // A size saved on a small screen stays small after moving to a larger screen.
-    const QRect small(work.x() + 20, work.y() + 20, 500, 350);
+    const QRect small(work.x() + 20, work.y() + 20,
+                      qMax(1, qMin(500, work.width() - 40)),
+                      qMax(1, qMin(350, work.height() - 40)));
     QSettings().setValue("window/normalGeometry", small);
     QWindow smallRestored;
     installWindowPlacement(&smallRestored, false);
