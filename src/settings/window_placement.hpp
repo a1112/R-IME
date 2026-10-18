@@ -1,10 +1,19 @@
 #pragma once
 #include <QGuiApplication>
+#include <QList>
 #include <QScreen>
 #include <QSettings>
 #include <QTimer>
 #include <QWindow>
+#include <algorithm>
 #include <memory>
+
+// A screen change during a normal drag must not clamp a straddling window.
+inline bool windowGeometryNeedsRecovery(QRect requested, const QList<QRect> &screens) {
+    return !screens.isEmpty() && std::none_of(screens.begin(), screens.end(), [requested](const QRect &screen) {
+        return requested.intersects(screen);
+    });
+}
 
 // QScreen work areas and QWindow geometry are already in logical pixels.
 inline void installWindowPlacement(QWindow *window, bool preview) {
@@ -48,20 +57,34 @@ inline void installWindowPlacement(QWindow *window, bool preview) {
     auto timer = new QTimer(window);
     timer->setInterval(200);
     timer->setSingleShot(true);
-    auto save = [window, settings] {
-        if (window->visibility() == QWindow::Windowed) {
-            settings->setValue("window/normalGeometry", window->geometry());
-            settings->sync();
-        }
+    auto normalGeometry = std::make_shared<QRect>(window->geometry());
+    auto save = [settings, normalGeometry] {
+        settings->setValue("window/normalGeometry", *normalGeometry);
+        settings->sync();
     };
     QObject::connect(timer, &QTimer::timeout, window, save);
-    auto schedule = [timer] { timer->start(); };
+    auto schedule = [window, timer, normalGeometry] {
+        if (window->visibility() != QWindow::Windowed) return;
+        // Capture before a state transition can overtake the debounce timer.
+        *normalGeometry = window->geometry();
+        timer->start();
+    };
     QObject::connect(window, &QWindow::xChanged, window, schedule);
     QObject::connect(window, &QWindow::yChanged, window, schedule);
     QObject::connect(window, &QWindow::widthChanged, window, schedule);
     QObject::connect(window, &QWindow::heightChanged, window, schedule);
+    QObject::connect(window, &QWindow::visibilityChanged, window, [timer, save](QWindow::Visibility visibility) {
+        if (visibility == QWindow::Windowed) return;
+        // Hide/close can destroy the timer before either timeout or app exit.
+        timer->stop();
+        save();
+    });
     QObject::connect(window, &QWindow::screenChanged, window, [window, fit] {
-        if (window->visibility() == QWindow::Windowed) fit(window->geometry(), false);
+        if (window->visibility() != QWindow::Windowed) return;
+        QList<QRect> screens;
+        for (auto *screen : QGuiApplication::screens()) screens.append(screen->geometry());
+        const QRect requested = window->geometry();
+        if (windowGeometryNeedsRecovery(requested, screens)) fit(requested, false);
     });
     QObject::connect(qApp, &QCoreApplication::aboutToQuit, window, save);
 }
