@@ -1,10 +1,14 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
 
 ApplicationWindow {
     id: window
+    objectName: "settingsWindow"
+    flags: Qt.Window | (Qt.platform.os === "osx" ? 0 : Qt.FramelessWindowHint)
+    readonly property bool modalOpen: phraseDialog.visible || restoreDialog.visible || closeDialog.visible || filePicker.visible
     width: 860; height: 620
     minimumWidth: 760; minimumHeight: 560
     visible: false
@@ -15,19 +19,47 @@ ApplicationWindow {
     property int page: Math.max(0, pages.indexOf(initialPage))
     property bool dark: (previewTheme !== "system" ? previewTheme : settings.config.appearance.theme) === "dark"
                         || ((previewTheme === "system" && settings.config.appearance.theme === "system") && Application.styleHints.colorScheme === Qt.Dark)
-    readonly property color ink: dark ? "#f1f2f5" : "#252936"
-    readonly property color muted: dark ? "#a6acb9" : "#777e8e"
-    readonly property color surface: dark ? "#292c33" : "#ffffff"
-    readonly property color borderColor: dark ? "#3b3f49" : "#e6e8ed"
-    readonly property color accent: "#3478f6"
+    SystemPalette { id: systemPalette; colorGroup: SystemPalette.Active }
+    readonly property bool highContrast: windowEffects.highContrast
+    readonly property color ink: highContrast ? systemPalette.windowText : dark ? "#f1f2f5" : "#252936"
+    readonly property color muted: highContrast ? systemPalette.windowText : dark ? "#a6acb9" : "#777e8e"
+    readonly property color surface: highContrast ? systemPalette.base : dark ? "#292c33" : "#ffffff"
+    readonly property color borderColor: highContrast ? systemPalette.windowText : dark ? "#3b3f49" : "#e6e8ed"
+    readonly property color accent: highContrast ? systemPalette.highlight : "#3478f6"
     property string fileAction: ""
     property url pendingBackup
     property int editingPhrase: -1
     property bool allowClose: false
-    color: dark ? "#22252c" : "#f7f8fa"
+    readonly property color solidBackground: highContrast ? systemPalette.window : dark ? "#22252c" : "#f7f8fa"
     font.family: Qt.platform.os === "windows" ? "Microsoft YaHei UI" : Qt.platform.os === "osx" ? "PingFang SC" : "Noto Sans CJK SC"
     font.pixelSize: 14
-    palette.window: color
+    color: "transparent"
+    readonly property bool materialActive: windowEffects.active && !highContrast
+    background: Rectangle {
+        objectName: "windowSurface"
+        color: window.materialActive ? Qt.rgba(window.solidBackground.r, window.solidBackground.g, window.solidBackground.b, 0.78) : window.solidBackground
+        radius: windowEffects.cornerRadius
+    }
+    header: WindowChrome {
+        objectName: "settingsChrome"
+        targetWindow: window
+        effects: windowEffects
+        foreground: window.ink
+        closeEnabled: !settings.busy
+        enabled: !window.modalOpen
+    }
+    Shortcut {
+        sequences: [StandardKey.Close, StandardKey.Quit]
+        enabled: !window.modalOpen
+        onActivated: window.close()
+    }
+    Shortcut {
+        sequences: [StandardKey.FullScreen]
+        enabled: !window.modalOpen
+        onActivated: window.visibility === Window.FullScreen ? window.showNormal() : window.showFullScreen()
+    }
+
+    palette.window: solidBackground
     palette.windowText: ink
     palette.text: ink
     palette.base: surface
@@ -62,11 +94,11 @@ ApplicationWindow {
         implicitHeight: 36; leftPadding: 10; rightPadding: 10
         color: window.ink; placeholderTextColor: window.muted
         selectionColor: window.accent; selectedTextColor: "white"
-        background: Rectangle { radius: 6; color: window.dark ? "#23262e" : "white"; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? window.accent : window.borderColor }
+        background: Rectangle { radius: 6; color: window.highContrast ? systemPalette.base : window.dark ? "#23262e" : "white"; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? window.accent : window.borderColor }
     }
     component ChoiceField: ComboBox {
         implicitHeight: 36
-        background: Rectangle { radius: 6; color: window.dark ? "#23262e" : "white"; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? window.accent : window.borderColor }
+        background: Rectangle { radius: 6; color: window.highContrast ? systemPalette.base : window.dark ? "#23262e" : "white"; border.width: parent.activeFocus ? 2 : 1; border.color: parent.activeFocus ? window.accent : window.borderColor }
     }
     component Card: Rectangle {
         default property alias content: contentColumn.data
@@ -107,10 +139,11 @@ ApplicationWindow {
     }
 
     RowLayout {
-        anchors.fill: parent; spacing: 0
+        objectName: "settingsBody"
+        anchors.fill: parent; anchors.margins: 8; spacing: 0
         Rectangle {
             Layout.fillHeight: true; Layout.preferredWidth: 196
-            color: window.dark ? "#1b1e25" : "#eceef3"
+            radius: 8; color: window.highContrast ? systemPalette.window : window.dark ? "#1b1e25" : "#eceef3"
             Rectangle { width: 1; anchors { right: parent.right; top: parent.top; bottom: parent.bottom } color: window.borderColor }
             ColumnLayout {
                 anchors { fill: parent; margins: 16 } spacing: 6
@@ -319,8 +352,8 @@ ApplicationWindow {
                     Layout.fillWidth: true; spacing: 10
                     BusyIndicator { running: settings.busy; visible: running; implicitWidth: 22; implicitHeight: 22 }
                     Label { text: settings.busy ? settings.status : settings.dirty ? "有未应用的更改" : settings.status || "设置已加载"; color: window.muted; font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-                    ActionButton { text: "放弃更改"; enabled: settings.dirty && !settings.busy; onClicked: settings.discard() }
-                    ActionButton { text: settings.busy ? "处理中…" : "应用"; primary: true; enabled: settings.dirty && !settings.busy; onClicked: settings.apply() }
+                    ActionButton { objectName: "discardSettingsButton"; text: "放弃更改"; enabled: settings.dirty && !settings.busy; onClicked: settings.discard() }
+                    ActionButton { objectName: "applySettingsButton"; text: settings.busy ? "处理中…" : "应用"; primary: true; enabled: settings.dirty && !settings.busy; onClicked: settings.apply() }
                 }
             }
         }
@@ -328,6 +361,7 @@ ApplicationWindow {
 
     FileDialog {
         id: filePicker
+        objectName: "filePicker"
         onAccepted: {
             if(window.fileAction === "importPhrases") settings.importPhrases(selectedFile)
             else if(window.fileAction === "exportPhrases") settings.exportPhrases(selectedFile)
@@ -336,14 +370,14 @@ ApplicationWindow {
         }
     }
     Dialog {
-        id: phraseDialog; title: window.editingPhrase < 0 ? "添加自定义短语" : "编辑自定义短语"
+        id: phraseDialog; objectName: "phraseDialog"; title: window.editingPhrase < 0 ? "添加自定义短语" : "编辑自定义短语"
         anchors.centerIn: parent; width: 430; modal: true
         contentItem: ColumnLayout {
             spacing: 12
             Label { text: "编码"; color: window.ink }
-            FormField { id: phraseCode; Layout.fillWidth: true; placeholderText: "小写字母，如 nihao"; selectByMouse: true }
+            FormField { id: phraseCode; objectName: "phraseCode"; Layout.fillWidth: true; placeholderText: "小写字母，如 nihao"; selectByMouse: true }
             Label { text: "短语"; color: window.ink }
-            FormField { id: phraseText; Layout.fillWidth: true; placeholderText: "输入要保存的文字"; selectByMouse: true }
+            FormField { id: phraseText; objectName: "phraseText"; Layout.fillWidth: true; placeholderText: "输入要保存的文字"; selectByMouse: true }
             RowLayout { Label { text: "权重"; color: window.ink; Layout.fillWidth: true } SpinBox { id: phraseWeight; from: 0; to: 1000000; editable: true; Layout.preferredWidth: 190 } }
             Note { text: "权重越高，候选越靠前。保存后点击主窗口“应用”生效。" }
             Label { visible: settings.error.length > 0; text: settings.error; color: "#be4839"; Layout.fillWidth: true; wrapMode: Text.Wrap; font.pixelSize: 12 }
@@ -354,15 +388,23 @@ ApplicationWindow {
         }
     }
     Dialog {
-        id: restoreDialog; title: "从备份恢复？"; anchors.centerIn: parent; width: 430; modal: true
+        id: restoreDialog; objectName: "restoreDialog"; title: "从备份恢复？"; anchors.centerIn: parent; width: 430; modal: true
         contentItem: Label { text: "备份将替换当前设置、自定义短语和用户学习词库。未应用的更改也会被替换。建议先导出一份当前备份。"; color: window.ink; wrapMode: Text.WordWrap }
         standardButtons: Dialog.Cancel | Dialog.Ok
         onAccepted: settings.importBackup(window.pendingBackup)
     }
     Dialog {
-        id: closeDialog; title: "放弃未应用的更改？"; anchors.centerIn: parent; width: 360; modal: true
+        id: closeDialog; objectName: "closeDialog"; title: "放弃未应用的更改？"; anchors.centerIn: parent; width: 360; modal: true
         contentItem: Label { text: "尚有更改未应用。关闭窗口会放弃这些更改。"; color: window.ink; wrapMode: Text.WordWrap }
         standardButtons: Dialog.Cancel | Dialog.Discard
         onDiscarded: { window.allowClose = true; window.close() }
+    }
+    ResizeHandles {
+        objectName: "windowResizeHandles"
+        parent: window.contentItem.parent
+        anchors.fill: parent
+        targetWindow: window
+        z: 100
+        enabled: !window.modalOpen && Qt.platform.os !== "osx" && window.visibility === Window.Windowed
     }
 }

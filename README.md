@@ -19,6 +19,9 @@ Windows 设置界面需要 Qt 6.11+，使用 FluentWinUI3 控件。
 
 源码构建、安装和卸载命令，以及实际测试范围见 [Windows 指南](docs/windows.md)。
 macOS InputMethodKit 接入尚未实现。
+Qt 设置外观包含无可见系统标题栏、圆角及可关闭的背景材质；系统降低透明度或高对比度时使用实色。
+macOS 仅可单独验证外观模块和离屏 QML，完整设置程序仍依赖尚未移植的 Linux IPC 接口，不代表 macOS 系统输入法支持。
+忙状态和未保存更改确认、候选条的系统角色保持不变。隔离测试和原生验收边界见 [窗口外观验证](tests/window_chrome.md)。
 
 ## Linux 构建
 

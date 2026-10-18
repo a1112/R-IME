@@ -1,5 +1,6 @@
 #include "backend.hpp"
 #include "window_placement.hpp"
+#include "windoweffects.h"
 #include <QCommandLineParser>
 #include <QFont>
 #include <QFontDatabase>
@@ -46,11 +47,13 @@ int main(int argc, char **argv) {
     parser.process(app);
     const bool qa = parser.isSet("smoke-test") || parser.isSet("screenshot");
     SettingsBackend backend(rime_ime::Paths::from_environment(), !qa);
+    WindowEffects windowEffects(&app, qa);
     QQmlApplicationEngine engine;
     bool qmlFailed = false;
     QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app,
                      [&](const QList<QQmlError> &) { qmlFailed = true; });
     engine.rootContext()->setContextProperty("settings", &backend);
+    engine.rootContext()->setContextProperty("windowEffects", &windowEffects);
     engine.rootContext()->setContextProperty("initialPage", parser.value("page"));
     engine.rootContext()->setContextProperty("previewTheme", parser.value("theme"));
 #ifdef _WIN32
@@ -60,8 +63,10 @@ int main(int argc, char **argv) {
 #endif
     if (engine.rootObjects().isEmpty())
         return 1;
-    if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first()))
+    if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first())) {
+        windowEffects.setWindow(window);
         installWindowPlacement(window, qa);
+    }
     if (qa)
         QTimer::singleShot(900, &app, [&] {
             if (parser.isSet("screenshot")) {
